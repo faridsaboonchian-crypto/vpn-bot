@@ -16,6 +16,7 @@ import sqlite3
 import threading
 from flask import Flask, Response
 
+# بارگذاری متغیرهای محیطی
 load_dotenv(dotenv_path="/root/.env")
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -28,7 +29,7 @@ CARD_NUMBER = os.getenv("CARD_NUMBER")
 PANEL_URL = os.getenv("PANEL_URL")
 SECRET_PATH = os.getenv("SECRET_PATH")
 API_TOKEN = os.getenv("API_TOKEN")
-INBOUND_ID = int(os.getenv("INBOUND_ID", 1))
+INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 
 # دریافت لیست IPها از .env و تبدیل به لیست
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
@@ -60,6 +61,7 @@ DISCOUNT_CODES = {
 
 DB_FILE = "/root/bot_users.db"
 
+# ==================== [ توابع دیتابیس ] ====================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -101,7 +103,7 @@ def fa_to_en_num(num_str):
 
 def en_to_fa_num(num_str):
     en_digits = "0123456789"
-    fa_digits = "۰۱۲۴۵۶۷۸۹"
+    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
     translation_table = str.maketrans(en_digits, fa_digits)
     return num_str.translate(translation_table)
 
@@ -132,31 +134,6 @@ def mark_discount_used(chat_id, code):
     except Exception as e:
         logging.error(f"Error marking discount as used: {e}")
     conn.close()
-
-def render_payment_card(message, chat_id, plan_key):
-    plan = PLANS[plan_key]
-    price_str = plan['price']
-    applied_code = USER_APPLIED_DISCOUNT.get(chat_id)
-    discount_text = ""
-    if applied_code and applied_code in DISCOUNT_CODES:
-        discount_percent = DISCOUNT_CODES[applied_code]
-        original_price = parse_price(price_str)
-        discount_amount = int(original_price * (discount_percent / 100))
-        final_price = original_price - discount_amount
-        price_str = format_price(final_price)
-        discount_text = f"🎁 <b>کد تخفیف اعمال شده:</b> <code>{applied_code}</code> (%{discount_percent} تخفیف)\n\n"
-    payment_text = (
-        f"💳 جهت فعال‌سازی اشتراک <b>{plan['name']}</b>،\n"
-        f"{discount_text}"
-        f"مبلغ <b>{price_str} تومان</b> را به کارت زیر واریز فرمایید:\n\n"
-        f"💳 <code>{CARD_NUMBER}</code>\n"
-        f"👤 <b>به نام فرید صابونچیان</b>\n\n"
-        f"⚠️ لطفاً <b>تصویر فیش واریزی</b> را ارسال نمایید."
-    )
-    if isinstance(message, types.Message):
-        bot.send_message(chat_id, payment_text, parse_mode="HTML")
-    else:
-        bot.edit_message_text(payment_text, chat_id, message.message_id, parse_mode="HTML")
 
 def get_user(chat_id):
     conn = sqlite3.connect(DB_FILE)
@@ -320,6 +297,7 @@ def test_api():
     except Exception as e:
         logging.error(f"خطا در تست API: {e}")
 
+# ==================== [ تابع ساخت سابسکریپشن ] ====================
 def create_vless_link(email, limit_gb, expiry_days=30):
     try:
         add_url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/clients/add"
@@ -351,6 +329,7 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
+                # ساخت لینک سابسکریپشن با پورت 2096 (پنل Sanaei)
                 sub_link = f"http://185.215.244.29:2096/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
@@ -358,6 +337,77 @@ def create_vless_link(email, limit_gb, expiry_days=30):
     except Exception as e:
         logging.error(f"خطای سرور: {str(e)}")
         return None
+
+# ==================== [ Flask Proxy برای سابسکریپشن با IPهای رندوم ] ====================
+app = Flask(__name__)
+
+def get_subscription_content(sub_id):
+    """دریافت محتوای سابسکریپشن از پنل و جایگزینی IP با IPهای رندوم"""
+    try:
+        logging.info(f"دریافت درخواست سابسکریپشن برای: {sub_id}")
+        
+        # دریافت لینک سابسکریپشن از پنل (پورت 2096)
+        sub_url = f"http://185.215.244.29:2096/sub/{sub_id}"
+        logging.info(f"درخواست به پنل: {sub_url}")
+        
+        response = requests.get(sub_url, timeout=10)
+        logging.info(f"پاسخ از پنل: {response.status_code}")
+        
+        if response.status_code == 200:
+            content = response.text
+            logging.info(f"محتوای دریافتی: {len(content)} بایت")
+            
+            # انتخاب یک IP رندوم از لیست
+            selected_ip = random.choice(CLEAN_IPS)
+            logging.info(f"IP انتخاب شده: {selected_ip}")
+            
+            # جایگزینی IP سرور با IP Cloudflare
+            content = content.replace("185.215.244.29", selected_ip)
+            
+            logging.info(f"سابسکریپشن {sub_id} با IP {selected_ip} ساخته شد")
+            return content
+        else:
+            logging.error(f"خطا در دریافت سابسکریپشن: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        logging.error(f"خطا در proxy subscription: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return None
+
+@app.route('/sub/<sub_id>', methods=['GET'])
+def proxy_subscription(sub_id):
+    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare روی پورت 80"""
+    logging.info(f"دریافت درخواست برای /sub/{sub_id}")
+    content = get_subscription_content(sub_id)
+    
+    if content:
+        logging.info(f"ارسال محتوا به کاربر - طول: {len(content)}")
+        return Response(content, mimetype='text/plain')
+    else:
+        logging.error("خطا در دریافت محتوا")
+        return Response("Error fetching subscription", status=500, mimetype='text/plain')
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """بررسی سلامت Flask"""
+    return Response("Flask is running", status=200, mimetype='text/plain')
+
+def run_flask():
+    """اجرای Flask روی پورت 80"""
+    try:
+        logging.info("شروع اجرای Flask روی پورت 80...")
+        app.run(host='0.0.0.0', port=80, debug=False, threaded=True)
+    except Exception as e:
+        logging.error(f"خطا در اجرای Flask روی پورت 80: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+
+# اجرای Flask در ترد پس‌زمینه
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+logging.info("✅ Proxy Subscription روی پورت 80 فعال شد")
+# ================================================================================
 
 def get_user_stats(chat_id):
     url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/inbounds/list"
@@ -418,45 +468,7 @@ def get_user_stats(chat_id):
         logging.error(f"خطا در استعلام حجم کاربر: {str(e)}")
         return None
 
-# ==================== [ Proxy Subscription با IPهای Cloudflare ] ====================
-app = Flask(__name__)
-
-def get_subscription_content(sub_id):
-    """دریافت محتوای سابسکریپشن از پنل و جایگزینی IP"""
-    try:
-        sub_url = f"http://185.215.244.29:2096/sub/{sub_id}"
-        response = requests.get(sub_url, timeout=10)
-        
-        if response.status_code == 200:
-            content = response.text
-            selected_ip = random.choice(CLEAN_IPS)
-            content = content.replace("185.215.244.29", selected_ip)
-            logging.info(f"سابسکریپشن {sub_id} با IP {selected_ip} ساخته شد")
-            return content
-        else:
-            logging.error(f"خطا در دریافت سابسکریپشن: {response.status_code}")
-            return None
-    except Exception as e:
-        logging.error(f"خطا در proxy subscription: {str(e)}")
-        return None
-
-@app.route('/sub/<sub_id>', methods=['GET'])
-def proxy_subscription(sub_id):
-    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
-    content = get_subscription_content(sub_id)
-    if content:
-        return Response(content, mimetype='text/plain')
-    else:
-        return Response("Error fetching subscription", status=500)
-
-def run_flask():
-    """اجرای Flask در ترد جداگانه"""
-    app.run(host='0.0.0.0', port=2097, debug=False)
-
-threading.Thread(target=run_flask, daemon=True).start()
-logging.info("✅ Proxy Subscription روی پورت 2097 فعال شد")
-# ================================================================================
-
+# ==================== [ هندلرهای ربات ] ====================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     if is_spammer(message.from_user.id):
@@ -504,7 +516,7 @@ def send_welcome(message):
                     bot.send_message(ADMIN_CHAT_ID, f"🎁 <b>یک لایسنس هدیه ۲ گیگی ۱ روزه</b> به طور خودکار برای کاربر `{referrer_id}` به دلیل دعوت ۳ نفر صادر شد.")
                     vless_link = create_vless_link(free_username, limit_gb=2, expiry_days=1)
                     if vless_link:
-                        proxy_sub_link = vless_link.replace(":2096", ":2097")
+                        proxy_sub_link = vless_link.replace(":2096", ":80")
                         gift_text = (
                             "🎉 <b>تبریک فراوان! شما با موفقیت ۳ کاربر را به ربات دعوت کردید.</b>\n\n"
                             "🎁 <b>هدیه شما آماده است!</b> یک اکانت پرسرعت ۲ گیگابایتی با اعتبار ۱ روزه برای شما صادر شد:\n\n"
@@ -639,7 +651,7 @@ def handle_free_features(call):
         vless_link = create_vless_link(test_username, limit_gb=1, expiry_days=1)
         if vless_link:
             set_received_test(chat_id)
-            proxy_sub_link = vless_link.replace(":2096", ":2097")
+            proxy_sub_link = vless_link.replace(":2096", ":80")
             success_text = (
                 "🎉 <b>اکانت تست ۱ روزه شما با موفقیت صادر شد!</b>\n\n"
                 "🎁 <b>لینک سابسکریپشن:</b>\n\n"
@@ -790,6 +802,31 @@ def process_discount_code(message, plan_key):
     bot.send_message(chat_id, "✅ کد تخفیف با موفقیت اعمال شد!")
     render_payment_card(message, chat_id, plan_key)
 
+def render_payment_card(message, chat_id, plan_key):
+    plan = PLANS[plan_key]
+    price_str = plan['price']
+    applied_code = USER_APPLIED_DISCOUNT.get(chat_id)
+    discount_text = ""
+    if applied_code and applied_code in DISCOUNT_CODES:
+        discount_percent = DISCOUNT_CODES[applied_code]
+        original_price = parse_price(price_str)
+        discount_amount = int(original_price * (discount_percent / 100))
+        final_price = original_price - discount_amount
+        price_str = format_price(final_price)
+        discount_text = f"🎁 <b>کد تخفیف اعمال شده:</b> <code>{applied_code}</code> (%{discount_percent} تخفیف)\n\n"
+    payment_text = (
+        f"💳 جهت فعال‌سازی اشتراک <b>{plan['name']}</b>،\n"
+        f"{discount_text}"
+        f"مبلغ <b>{price_str} تومان</b> را به کارت زیر واریز فرمایید:\n\n"
+        f"💳 <code>{CARD_NUMBER}</code>\n"
+        f"👤 <b>به نام فرید صابونچیان</b>\n\n"
+        f"⚠️ لطفاً <b>تصویر فیش واریزی</b> را ارسال نمایید."
+    )
+    if isinstance(message, types.Message):
+        bot.send_message(chat_id, payment_text, parse_mode="HTML")
+    else:
+        bot.edit_message_text(payment_text, chat_id, message.message_id, parse_mode="HTML")
+
 @bot.message_handler(content_types=['photo'])
 def handle_receipt(message):
     if is_spammer(message.from_user.id, cooldown=3.0):
@@ -849,10 +886,13 @@ def handle_admin_action(call):
         )
         if sub_link:
             logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
-            proxy_sub_link = sub_link.replace(":2096", ":2097")
+            # تغییر پورت از 2096 به 80
+            proxy_sub_link = sub_link.replace(":2096", ":80")
+            
             if discount_code != "none" and discount_code in DISCOUNT_CODES:
                 mark_discount_used(target_user_id, discount_code)
                 logging.info(f"کد تخفیف {discount_code} برای کاربر {target_user_id} ثبت شد")
+            
             success_text = (
                 f"پرداخت شما تایید شد! 🎉\n\n"
                 f"🚀 <b>لینک سابسکریپشن شما (با IPهای Cloudflare):</b>\n\n"
@@ -957,6 +997,7 @@ def broadcast_message(message):
             fail_count += 1
     bot.send_message(ADMIN_CHAT_ID, f"📢 **ارسال پیام همگانی به پایان رسید!**\n\n🟢 ارسال موفق: `{success_count}`\n🔴 ارسال ناموفق (بلاک): `{fail_count}`")
 
+# ==================== [ اجرای نهایی ] ====================
 init_db()
 threading.Thread(target=sync_profiles_background, daemon=True).start()
 test_api()
