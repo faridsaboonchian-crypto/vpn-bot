@@ -20,17 +20,13 @@ load_dotenv(dotenv_path="/root/.env")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# ==================== [ کادر تنظیمات محرمانه سرور ] ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 PANEL_URL = os.getenv("PANEL_URL")
 SECRET_PATH = os.getenv("SECRET_PATH")
 API_TOKEN = os.getenv("API_TOKEN")
-
-# متغیر شناسه اینباند پویا از فایل .env (مقدار پیش‌فرض 2)
 INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
-# ====================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -76,33 +72,6 @@ def init_db():
     if "has_received_referral_reward" not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN has_received_referral_reward INTEGER DEFAULT 0")
     conn.commit()
-    json_path = "/root/bot_users.json"
-    backup_path = "/root/bot_users_backup.json"
-    source_path = None
-    if os.path.exists(json_path):
-        source_path = json_path
-    elif os.path.exists(backup_path):
-        cursor.execute("SELECT COUNT(*) FROM users")
-        if cursor.fetchone()[0] == 0:
-            source_path = backup_path
-    if source_path:
-        try:
-            with open(source_path, "r", encoding="utf-8") as f:
-                old_data = json.load(f)
-            logging.info(f"=== [در حال مهاجرت {len(old_data)} کاربر از {source_path} به SQLite...] ===")
-            for chat_id, data in old_data.items():
-                referred_by = data.get("referred_by")
-                invite_count = data.get("invite_count", 0)
-                cursor.execute('''
-                    INSERT OR IGNORE INTO users (chat_id, referred_by, invite_count)
-                    VALUES (?, ?, ?)
-                ''', (str(chat_id), referred_by, invite_count))
-            conn.commit()
-            if source_path == json_path:
-                os.rename(json_path, backup_path)
-            logging.info("=== [مهاجرت داده‌های قدیمی با موفقیت انجام شد] ===")
-        except Exception as e:
-            logging.error(f"خطا در مهاجرت دیتابیس قدیمی به SQLite: {e}")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_discounts (
             chat_id TEXT,
@@ -122,7 +91,7 @@ def fa_to_en_num(num_str):
 
 def en_to_fa_num(num_str):
     en_digits = "0123456789"
-    fa_digits = "۰۱۲۴۵۶۷۸۹"
+    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
     translation_table = str.maketrans(en_digits, fa_digits)
     return num_str.translate(translation_table)
 
@@ -376,7 +345,6 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
-                # ✅ ساخت لینک سابسکریپشن به جای لینک VLESS
                 sub_link = f"http://185.215.244.29:2096/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
@@ -825,14 +793,17 @@ def handle_admin_action(call):
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
         unique_username = f"user_{target_user_id}_{suffix}"
+        logging.info(f"=== [تلاش برای ساخت سابسکریپشن برای کاربر {target_user_id}] ===")
         sub_link = create_vless_link(
             unique_username,
             limit_gb=PLANS[plan_key]['gb'],
             expiry_days=PLANS[plan_key]['days']
         )
         if sub_link:
-            if discount_code != "none":
+            logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
+            if discount_code != "none" and discount_code in DISCOUNT_CODES:
                 mark_discount_used(target_user_id, discount_code)
+                logging.info(f"کد تخفیف {discount_code} برای کاربر {target_user_id} ثبت شد")
             success_text = (
                 f"پرداخت شما تایید شد! 🎉\n\n"
                 f"🚀 <b>لینک سابسکریپشن شما:</b>\n\n"
@@ -844,6 +815,7 @@ def handle_admin_action(call):
             bot.send_message(target_user_id, success_text, parse_mode="HTML")
             bot.send_message(ADMIN_CHAT_ID, "سابسکریپشن با موفقیت صادر شد. ✅")
         else:
+            logging.error("خطا در ساخت سابسکریپشن - پنل پاسخ نداد")
             bot.send_message(ADMIN_CHAT_ID, "عملیات ناموفق بود! لطفاً لاگ سرور (tail -n 30 bot.log) را بررسی کنید. ❌")
     elif action == "reject":
         markup = types.InlineKeyboardMarkup(row_width=1)
