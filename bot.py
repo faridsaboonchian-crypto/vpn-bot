@@ -14,19 +14,29 @@ import os
 from dotenv import load_dotenv
 import sqlite3
 import threading
+from flask import Flask, Response
 
 load_dotenv(dotenv_path="/root/.env")
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# ==================== [ تنظیمات اصلی از فایل .env ] ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 PANEL_URL = os.getenv("PANEL_URL")
 SECRET_PATH = os.getenv("SECRET_PATH")
 API_TOKEN = os.getenv("API_TOKEN")
-INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
+INBOUND_ID = int(os.getenv("INBOUND_ID", 1))
+
+# دریافت لیست IPها از .env و تبدیل به لیست
+CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
+CLEAN_IPS = [ip.strip() for ip in CLEAN_IP_STR.split(",")]
+
+WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
+WS_PATH = os.getenv("WS_PATH", "/sanatify-safe/")
+# ====================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -91,7 +101,7 @@ def fa_to_en_num(num_str):
 
 def en_to_fa_num(num_str):
     en_digits = "0123456789"
-    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
+    fa_digits = "۰۱۲۴۵۶۷۸۹"
     translation_table = str.maketrans(en_digits, fa_digits)
     return num_str.translate(translation_table)
 
@@ -310,10 +320,6 @@ def test_api():
     except Exception as e:
         logging.error(f"خطا در تست API: {e}")
 
-CLEAN_IP = os.getenv("CLEAN_IP", "188.114.97.2")
-WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
-WS_PATH = os.getenv("WS_PATH", "/sanatify-safe/")
-
 def create_vless_link(email, limit_gb, expiry_days=30):
     try:
         add_url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/clients/add"
@@ -412,6 +418,45 @@ def get_user_stats(chat_id):
         logging.error(f"خطا در استعلام حجم کاربر: {str(e)}")
         return None
 
+# ==================== [ Proxy Subscription با IPهای Cloudflare ] ====================
+app = Flask(__name__)
+
+def get_subscription_content(sub_id):
+    """دریافت محتوای سابسکریپشن از پنل و جایگزینی IP"""
+    try:
+        sub_url = f"http://185.215.244.29:2096/sub/{sub_id}"
+        response = requests.get(sub_url, timeout=10)
+        
+        if response.status_code == 200:
+            content = response.text
+            selected_ip = random.choice(CLEAN_IPS)
+            content = content.replace("185.215.244.29", selected_ip)
+            logging.info(f"سابسکریپشن {sub_id} با IP {selected_ip} ساخته شد")
+            return content
+        else:
+            logging.error(f"خطا در دریافت سابسکریپشن: {response.status_code}")
+            return None
+    except Exception as e:
+        logging.error(f"خطا در proxy subscription: {str(e)}")
+        return None
+
+@app.route('/sub/<sub_id>', methods=['GET'])
+def proxy_subscription(sub_id):
+    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
+    content = get_subscription_content(sub_id)
+    if content:
+        return Response(content, mimetype='text/plain')
+    else:
+        return Response("Error fetching subscription", status=500)
+
+def run_flask():
+    """اجرای Flask در ترد جداگانه"""
+    app.run(host='0.0.0.0', port=2097, debug=False)
+
+threading.Thread(target=run_flask, daemon=True).start()
+logging.info("✅ Proxy Subscription روی پورت 2097 فعال شد")
+# ================================================================================
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     if is_spammer(message.from_user.id):
@@ -459,10 +504,11 @@ def send_welcome(message):
                     bot.send_message(ADMIN_CHAT_ID, f"🎁 <b>یک لایسنس هدیه ۲ گیگی ۱ روزه</b> به طور خودکار برای کاربر `{referrer_id}` به دلیل دعوت ۳ نفر صادر شد.")
                     vless_link = create_vless_link(free_username, limit_gb=2, expiry_days=1)
                     if vless_link:
+                        proxy_sub_link = vless_link.replace(":2096", ":2097")
                         gift_text = (
                             "🎉 <b>تبریک فراوان! شما با موفقیت ۳ کاربر را به ربات دعوت کردید.</b>\n\n"
                             "🎁 <b>هدیه شما آماده است!</b> یک اکانت پرسرعت ۲ گیگابایتی با اعتبار ۱ روزه برای شما صادر شد:\n\n"
-                            f"<code>{vless_link}</code>\n\n"
+                            f"<code>{proxy_sub_link}</code>\n\n"
                             "📱 <b>راهنمای استفاده:</b>\n"
                             "در منوی اصلی ربات روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید."
                         )
@@ -477,6 +523,7 @@ def send_welcome(message):
             else:
                 print(f"[DEBUG LOG 2 - Negative] Condition NOT met for host {referrer_id}. No reward will be generated.")
                 logging.info(f"=== [رد شرط] دعوت‌کننده {referrer_id} واجد شرایط هدیه نیست (دعوت‌ها: {current_invites}، وضعیت پاداش: {has_received_reward}) ===")
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton("🛒 خرید اشتراک پرسرعت"),
@@ -498,58 +545,58 @@ def subscription_guide(message):
     if is_spammer(message.from_user.id):
         return
     guide_text = (
-        "📱 <b>راهنمای کامل استفاده از سابسکریپشن</b>\n\n"
-        "✅ <b>مزایای سابسکریپشن:</b>\n"
+        "📱 راهنمای کامل استفاده از سابسکریپشن\n\n"
+        "✅ مزایای سابسکریپشن:\n"
         "• با هر بار آپدیت، جدیدترین آی‌پی‌های تمیز را دریافت می‌کنید\n"
         "• نیازی به دریافت کانفیگ جدید نیست\n"
         "• حجم و تاریخ انقضا به صورت خودکار نمایش داده می‌شود\n\n"
-        "🔧 <b>نحوه اضافه کردن در v2rayNG:</b>\n"
+        "🔧 نحوه اضافه کردن در v2rayNG:\n"
         "۱. برنامه v2rayNG را باز کنید\n"
         "۲. روی منوی سه خط (☰) بالا سمت راست بزنید\n"
-        "۳. گزینه <b>Subscription group setting</b> را انتخاب کنید\n"
-        "۴. روی آیکون <b>+</b> (بالا سمت راست) بزنید\n"
+        "۳. گزینه Subscription group setting را انتخاب کنید\n"
+        "۴. روی آیکون + (بالا سمت راست) بزنید\n"
         "۵. در صفحه باز شده:\n"
-        "   • در کادر <b>remarks</b> یک نام دلخواه بنویسید (مثلاً: سرور آلمان)\n"
-        "   • در کادر <b>Optional URL</b> لینک سابسکریپشن را پیست کنید\n"
-        "   • گزینه <b>Enable update</b> را روشن کنید\n"
-        "   • ⚠️ مهم: گزینه <b>Allow insecure HTTP address</b> را حتماً روشن کنید\n"
+        "   • در کادر remarks یک نام دلخواه بنویسید (مثلاً: سرور آلمان)\n"
+        "   • در کادر Optional URL لینک سابسکریپشن را پیست کنید\n"
+        "   • گزینه Enable update را روشن کنید\n"
+        "   • ⚠️ مهم: گزینه Allow insecure HTTP address را حتماً روشن کنید\n"
         "۶. روی تیک (✓) بالا سمت راست بزنید تا ذخیره شود\n"
         "۷. با دکمه بازگشت به صفحه اصلی برگردید\n"
         "۸. روی آیکون فلش چرخان (🔄) بزنید تا کانفیگ‌ها دانلود شوند\n"
         "۹. سرور را انتخاب کرده و دکمه V را بزنید\n\n"
-        "🔄 <b>نحوه آپدیت آی‌پی‌های جدید:</b>\n"
+        "🔄 نحوه آپدیت آی‌پی‌های جدید:\n"
         "هر زمان خواستید آی‌پی‌های جدید دریافت کنید:\n"
         "۱. در صفحه اصلی v2rayNG روی آیکون 🔄 بزنید\n"
         "۲. یا روی سابسکریپشن نگه دارید و Update را انتخاب کنید\n"
         "۳. کانفیگ‌ها به‌روز می‌شوند!\n\n"
-        "📌 <b>نکته مهم:</b>\n"
+        "📌 نکته مهم:\n"
         "هر زمان که آی‌پی‌های سرور تغییر کند یا کانفیگ جدیدی اضافه شود،\n"
         "با زدن دکمه آپدیت، همه چیز به‌طور خودکار دریافت می‌شود."
     )
-    bot.send_message(message.chat.id, guide_text, parse_mode="HTML")
+    bot.send_message(message.chat.id, guide_text)
 
 @bot.message_handler(func=lambda message: message.text == "📚 راهنمای اتصال")
 def connection_guide(message):
     if is_spammer(message.from_user.id):
         return
     guide_text = (
-        "📚 **راهنمای جامع اتصال به شبکه پرسرعت ما**\n\n"
+        "📚 راهنمای جامع اتصال به شبکه پرسرعت ما\n\n"
         "لطفاً بر اساس سیستم‌عامل دستگاه خود، نرم‌افزار مربوطه را نصب کنید:\n\n"
-        "🤖 **سیستم‌عامل اندروید:**\n"
-        "۱. ابتدا نرم‌افزار **v2rayNG** را از گوگل‌پلی دانلود کنید.\n"
+        "🤖 سیستم‌عامل اندروید:\n"
+        "۱. ابتدا نرم‌افزار v2rayNG را از گوگل‌پلی دانلود کنید.\n"
         "۲. لینکی که ربات برای شما فرستاده را کپی کنید.\n"
-        "۳. وارد برنامه شوید، علامت مثبت `+` بالا را بزنید و گزینه `Import config from clipboard` را انتخاب کنید.\n"
+        "۳. وارد برنامه شوید، علامت مثبت + بالا را بزنید و گزینه Import config from clipboard را انتخاب کنید.\n"
         "۴. روی کانکشن اضافه شده کلیک کرده و دکمه اتصال در پایین را بزنید.\n\n"
-        "🍏 **سیستم‌عامل آیفون (iOS):**\n"
-        "۱. نرم‌افزار **FoXray** یا **v2raybox** را از اپ‌استور دانلود کنید.\n"
-        "۲. لینک کپی‌شده را از طریق علامت `+` در برنامه پیست (Import) کنید.\n\n"
-        "💻 **سیستم‌عامل ویندوز (کامپیوتر):**\n"
-        "۱. برنامه **v2rayN** را دانلود و اجرا کرده و لینک را پیست کنید.\n\n"
-        "📱 <b>راهنمای استفاده از سابسکریپشن:</b>\n"
+        "🍏 سیستم‌عامل آیفون (iOS):\n"
+        "۱. نرم‌افزار FoXray یا v2raybox را از اپ‌استور دانلود کنید.\n"
+        "۲. لینک کپی‌شده را از طریق علامت + در برنامه پیست (Import) کنید.\n\n"
+        "💻 سیستم‌عامل ویندوز (کامپیوتر):\n"
+        "۱. برنامه v2rayN را دانلود و اجرا کرده و لینک را پیست کنید.\n\n"
+        "📱 راهنمای استفاده از سابسکریپشن:\n"
         "برای دریافت خودکار آپدیت‌ها و آی‌پی‌های جدید،\n"
-        "از دکمه <b>📱 راهنمای سابسکریپشن</b> در منوی اصلی استفاده کنید."
+        "از دکمه 📱 راهنمای سابسکریپشن در منوی اصلی استفاده کنید."
     )
-    bot.send_message(message.chat.id, guide_text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, guide_text)
 
 @bot.message_handler(func=lambda message: message.text == "🎁 دعوت از دوستان (حجم رایگان)")
 def invite_friends_menu(message):
@@ -592,10 +639,11 @@ def handle_free_features(call):
         vless_link = create_vless_link(test_username, limit_gb=1, expiry_days=1)
         if vless_link:
             set_received_test(chat_id)
+            proxy_sub_link = vless_link.replace(":2096", ":2097")
             success_text = (
                 "🎉 <b>اکانت تست ۱ روزه شما با موفقیت صادر شد!</b>\n\n"
                 "🎁 <b>لینک سابسکریپشن:</b>\n\n"
-                f"<code>{vless_link}</code>\n\n"
+                f"<code>{proxy_sub_link}</code>\n\n"
                 "📱 <b>راهنمای استفاده:</b>\n"
                 "در منوی اصلی ربات روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید.\n"
                 "📌 کادر بالا را لمس (کپی) کنید و در برنامه v2rayNG پیست فرمایید."
@@ -801,16 +849,18 @@ def handle_admin_action(call):
         )
         if sub_link:
             logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
+            proxy_sub_link = sub_link.replace(":2096", ":2097")
             if discount_code != "none" and discount_code in DISCOUNT_CODES:
                 mark_discount_used(target_user_id, discount_code)
                 logging.info(f"کد تخفیف {discount_code} برای کاربر {target_user_id} ثبت شد")
             success_text = (
                 f"پرداخت شما تایید شد! 🎉\n\n"
-                f"🚀 <b>لینک سابسکریپشن شما:</b>\n\n"
-                f"<code>{sub_link}</code>\n\n"
+                f"🚀 <b>لینک سابسکریپشن شما (با IPهای Cloudflare):</b>\n\n"
+                f"<code>{proxy_sub_link}</code>\n\n"
                 f"📱 <b>راهنمای استفاده:</b>\n"
                 f"برای نحوه اضافه کردن این لینک به v2rayNG،\n"
-                f"در منوی اصلی ربات روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید."
+                f"در منوی اصلی ربات روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید.\n\n"
+                f"✨ <b>مزیت:</b> هر بار که آپدیت کنید، IP جدید دریافت می‌کنید!"
             )
             bot.send_message(target_user_id, success_text, parse_mode="HTML")
             bot.send_message(ADMIN_CHAT_ID, "سابسکریپشن با موفقیت صادر شد. ✅")
