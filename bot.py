@@ -342,71 +342,103 @@ def create_vless_link(email, limit_gb, expiry_days=30):
 app = Flask(__name__)
 
 def get_subscription_content(sub_id):
-    """دریافت محتوای سابسکریپشن از پنل و جایگزینی IP با IPهای رندوم"""
+    """دریافت محتوای سابسکریپشن از پنل و جایگزینی IP"""
     try:
-        logging.info(f"دریافت درخواست سابسکریپشن برای: {sub_id}")
+        logging.info(f"🔹 [SUB] درخواست دریافت سابسکریپشن برای: {sub_id}")
         
         # دریافت لینک سابسکریپشن از پنل (پورت 2096)
         sub_url = f"http://185.215.244.29:2096/sub/{sub_id}"
-        logging.info(f"درخواست به پنل: {sub_url}")
+        logging.info(f"🔹 [SUB] درخواست به پنل: {sub_url}")
         
-        response = requests.get(sub_url, timeout=10)
-        logging.info(f"پاسخ از پنل: {response.status_code}")
+        response = requests.get(sub_url, timeout=10, verify=False)
+        logging.info(f"🔹 [SUB] پاسخ از پنل: {response.status_code}")
         
         if response.status_code == 200:
             content = response.text
-            logging.info(f"محتوای دریافتی: {len(content)} بایت")
+            logging.info(f"🔹 [SUB] محتوای دریافتی: {len(content)} بایت")
+            logging.info(f"🔹 [SUB] محتوای نمونه: {content[:100]}...")
             
             # انتخاب یک IP رندوم از لیست
             selected_ip = random.choice(CLEAN_IPS)
-            logging.info(f"IP انتخاب شده: {selected_ip}")
+            logging.info(f"🔹 [SUB] IP انتخاب شده: {selected_ip}")
+            logging.info(f"🔹 [SUB] لیست IPهای موجود: {CLEAN_IPS}")
             
             # جایگزینی IP سرور با IP Cloudflare
+            old_content = content
             content = content.replace("185.215.244.29", selected_ip)
             
-            logging.info(f"سابسکریپشن {sub_id} با IP {selected_ip} ساخته شد")
+            if old_content != content:
+                logging.info(f"✅ [SUB] IP جایگزین شد: 185.215.244.29 -> {selected_ip}")
+            else:
+                logging.warning(f"⚠️ [SUB] IP سرور در محتوا پیدا نشد!")
+            
+            logging.info(f"✅ [SUB] سابسکریپشن {sub_id} با موفقیت ساخته شد")
             return content
         else:
-            logging.error(f"خطا در دریافت سابسکریپشن: {response.status_code} - {response.text}")
+            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن: {response.status_code}")
+            logging.error(f"❌ [SUB] متن پاسخ: {response.text}")
             return None
     except Exception as e:
-        logging.error(f"خطا در proxy subscription: {str(e)}")
+        logging.error(f"❌ [SUB] خطا در proxy subscription: {str(e)}")
         import traceback
         logging.error(traceback.format_exc())
         return None
 
 @app.route('/sub/<sub_id>', methods=['GET'])
 def proxy_subscription(sub_id):
-    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare روی پورت 80"""
-    logging.info(f"دریافت درخواست برای /sub/{sub_id}")
+    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
+    logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
+    logging.info(f"🔸 [ROUTE] Remote IP: {request.remote_addr}")
+    
     content = get_subscription_content(sub_id)
     
     if content:
-        logging.info(f"ارسال محتوا به کاربر - طول: {len(content)}")
-        return Response(content, mimetype='text/plain')
+        logging.info(f"✅ [ROUTE] ارسال محتوا به کاربر - طول: {len(content)} بایت")
+        return Response(content, mimetype='text/plain', headers={
+            'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Expires': '0'
+        })
     else:
-        logging.error("خطا در دریافت محتوا")
-        return Response("Error fetching subscription", status=500, mimetype='text/plain')
+        logging.error(f"❌ [ROUTE] خطا در دریافت محتوا")
+        return Response("Error: Unable to fetch subscription\n\nPlease check logs for details.", 
+                       status=500, 
+                       mimetype='text/plain')
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """بررسی سلامت Flask"""
-    return Response("Flask is running", status=200, mimetype='text/plain')
+    logging.info("دریافت درخواست health check")
+    return Response("Flask is running - OK", status=200, mimetype='text/plain')
+
+@app.errorhandler(404)
+def not_found(e):
+    logging.warning(f"⚠️ [404] مسیر یافت نشد: {request.path}")
+    return Response("404 Not Found", status=404)
 
 def run_flask():
     """اجرای Flask روی پورت 80"""
     try:
-        logging.info("شروع اجرای Flask روی پورت 80...")
-        app.run(host='0.0.0.0', port=80, debug=False, threaded=True)
+        logging.info("🚀 [FLASK] شروع اجرای Flask روی پورت 80...")
+        logging.info(f"🚀 [FLASK] لیست IPهای Cloudflare: {CLEAN_IPS}")
+        
+        # غیرفعال کردن لاگ‌های پیش‌فرض Flask
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+        
+        app.run(host='0.0.0.0', port=80, debug=False, threaded=True, use_reloader=False)
+        
     except Exception as e:
-        logging.error(f"خطا در اجرای Flask روی پورت 80: {str(e)}")
+        logging.error(f"❌ [FLASK] خطا در اجرای Flask: {str(e)}")
         import traceback
         logging.error(traceback.format_exc())
+        logging.error(f"❌ [FLASK] احتمالاً پورت 80 اشغال است!")
 
 # اجرای Flask در ترد پس‌زمینه
+logging.info("📌 [MAIN] در حال ایجاد ترد برای Flask...")
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
-logging.info("✅ Proxy Subscription روی پورت 80 فعال شد")
+logging.info("✅ [MAIN] Proxy Subscription روی پورت 80 فعال شد")
 # ================================================================================
 
 def get_user_stats(chat_id):
