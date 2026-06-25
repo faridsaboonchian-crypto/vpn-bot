@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import sqlite3
 import threading
 from flask import Flask, Response, request
+from urllib.parse import urlparse
 
 # بارگذاری متغیرهای محیطی
 load_dotenv(dotenv_path="/root/.env")
@@ -31,15 +32,15 @@ SECRET_PATH = os.getenv("SECRET_PATH")
 API_TOKEN = os.getenv("API_TOKEN")
 INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 
+# استخراج خودکار آی‌پی سرور از PANEL_URL (نیاز به دستکاری .env نیست)
+PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
+
 # دریافت لیست IPها از .env و تبدیل به لیست
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
 CLEAN_IPS = [ip.strip() for ip in CLEAN_IP_STR.split(",") if ip.strip()]
 
 # آدرس API برای دریافت IP تمیز (به عنوان نمونه از ircf.space استفاده شده)
 CLEAN_IP_API = os.getenv("CLEAN_IP_API", "https://api.ircf.space/v1/host")
-
-# آدرس سرور اصلی پنل شما برای جایگزینی در سابسکریپشن
-PANEL_SERVER_IP = os.getenv("PANEL_SERVER_IP", "185.215.244.29")
 
 WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
 WS_PATH = os.getenv("WS_PATH", "/sanatify-safe/")
@@ -335,7 +336,8 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
-                sub_link = f"http://{PANEL_SERVER_IP}:8080/sub/{sub_id}"
+                # پورت 80 به صورت پیش‌فرض برای HTTP است، نیاز به ذکر پورت نیست
+                sub_link = f"http://{PANEL_SERVER_IP}/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
         return None
@@ -371,13 +373,15 @@ def proxy_subscription(sub_id):
     logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
     
     try:
-        panel_url = f"http://{PANEL_SERVER_IP}:2096/sub/{sub_id}"
+        # درخواست به پنل اصلی (با توجه به PANEL_URL موجود در .env)
+        panel_url = f"{PANEL_URL}/sub/{sub_id}"
         response = requests.get(panel_url, timeout=10, verify=False)
         
         if response.status_code == 200:
             content = response.text
             selected_ip = get_clean_ip()
             
+            # جایگزینی IP سرور اصلی با IP تمیز
             new_content = content.replace(PANEL_SERVER_IP, selected_ip)
             logging.info(f"✅ [SUB] IP جایگزین شد: {PANEL_SERVER_IP} -> {selected_ip}")
             
