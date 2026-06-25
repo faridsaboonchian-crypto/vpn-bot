@@ -9,7 +9,6 @@ import random
 import string
 import time
 import base64
-import re
 from datetime import datetime
 import jdatetime
 import os
@@ -334,7 +333,7 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         }
         response = requests.post(add_url, json=payload, headers=headers, timeout=10, verify=False)
         logging.info(f"وضعیت پاسخ پنل: {response.status_code}")
-
+        
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
@@ -350,186 +349,76 @@ def create_vless_link(email, limit_gb, expiry_days=30):
 # ==================== [ Flask Proxy برای سابسکریپشن با IPهای رندوم ] ====================
 app = Flask(__name__)
 
-def is_base64(s):
-    """بررسی میکند که آیا متن ورودی Base64 است یا خیر"""
-    try:
-        # حذف whitespace های احتمالی
-        s_stripped = s.strip()
-        if not s_stripped:
-            return False
-        decoded = base64.b64decode(s_stripped, validate=True).decode('utf-8')
-        return '://' in decoded
-    except Exception:
-        return False
-
-
 def get_clean_ip():
     """تابع دریافت IP تمیز از API و در صورت شکست، استفاده از لیست فایل env"""
     try:
         response = requests.get(CLEAN_IP_API, timeout=5, verify=False)
         if response.status_code == 200:
             ip = response.text.strip()
-            # اعتبارسنجی فرمت IP
-            if ip and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
+            if ip:
                 logging.info(f"🔹 [SUB] IP تمیز از API دریافت شد: {ip}")
                 return ip
-            else:
-                logging.warning(f"⚠️ [SUB] IP نامعتبر از API دریافت شد: {ip}")
     except Exception as e:
         logging.warning(f"⚠️ [SUB] خطا در دریافت IP از API، استفاده از لیست ثابت: {e}")
-
+    
     if CLEAN_IPS:
         selected = random.choice(CLEAN_IPS)
         logging.info(f"🔹 [SUB] IP از لیست ثابت انتخاب شد: {selected}")
         return selected
-
+    
     return "188.114.97.2" # آی‌پی پیش‌فرض اضطراری
-
-
-# ==================== [ توابع جایگزینی هوشمند آدرس در کانفیگ‌ها ] ====================
-def replace_address_in_vless_url(vless_url, new_address):
-    """
-    در یک لینک VLESS فقط آدرس اتصال (بین @ و پورت/پارامترها) را جایگزین می‌کند.
-    SNI، Host، Path و سایر پارامترها دست‌نخورده باقی می‌مانند.
-
-    مثال ورودی:
-      vless://uuid@v2.sanatify.ir:443?type=ws&security=tls&sni=v2.sanatify.ir&host=v2.sanatify.ir&path=%2Fsanatify-safe%2F#name
-    خروجی (با new_address=188.114.97.2):
-      vless://uuid@188.114.97.2:443?type=ws&security=tls&sni=v2.sanatify.ir&host=v2.sanatify.ir&path=%2Fsanatify-safe%2F#name
-    """
-    match = re.match(r'^(vless://[^@]+@)([^:?#]+)(.*)$', vless_url)
-    if match:
-        prefix, old_address, suffix = match.groups()
-        logging.info(f"   ↳ VLESS address: {old_address} → {new_address}")
-        return f"{prefix}{new_address}{suffix}"
-    return vless_url
-
-
-def replace_address_in_trojan_url(trojan_url, new_address):
-    """مثل VLESS، فقط آدرس اتصال در trojan:// را جایگزین می‌کند."""
-    match = re.match(r'^(trojan://[^@]+@)([^:?#]+)(.*)$', trojan_url)
-    if match:
-        prefix, old_address, suffix = match.groups()
-        logging.info(f"   ↳ Trojan address: {old_address} → {new_address}")
-        return f"{prefix}{new_address}{suffix}"
-    return trojan_url
-
-
-def replace_address_in_vmess_url(vmess_url, new_address):
-    """
-    در vmess:// فرمت base64(json) است. فقط فیلد 'add' (آدرس اتصال) را جایگزین می‌کند.
-    SNI (sni)، Host (host) و Path (path) دست‌نخورده باقی می‌مانند.
-    """
-    try:
-        encoded_part = vmess_url.replace('vmess://', '', 1).split('#')[0]
-        decoded = base64.b64decode(encoded_part).decode('utf-8')
-        config = json.loads(decoded)
-        old_add = config.get('add', '')
-        if old_add:
-            config['add'] = new_address
-            logging.info(f"   ↳ VMess address: {old_add} → {new_address}")
-        new_encoded = base64.b64encode(json.dumps(config, separators=(',', ':')).encode('utf-8')).decode('utf-8')
-        # بازگرداندن fragment (#name) در صورت وجود
-        if '#' in vmess_url:
-            return f"vmess://{new_encoded}#{vmess_url.split('#', 1)[1]}"
-        return f"vmess://{new_encoded}"
-    except Exception as e:
-        logging.warning(f"   ↳ خطا در پردازش VMess URL: {e}")
-        return vmess_url
-
-
-def replace_address_in_config_line(line, new_address):
-    """تشخیص نوع کانفیگ و جایگزینی فقط آدرس اتصال."""
-    line = line.strip()
-    if not line:
-        return line
-    if line.startswith('vless://'):
-        return replace_address_in_vless_url(line, new_address)
-    elif line.startswith('trojan://'):
-        return replace_address_in_trojan_url(line, new_address)
-    elif line.startswith('vmess://'):
-        return replace_address_in_vmess_url(line, new_address)
-    # خطوط دیگر (مثل ss://) دست‌نخورده برگردانده می‌شوند
-    return line
-
-
-def process_subscription_content(content, selected_ip):
-    """
-    محتوای سابسکریپشن را پردازش می‌کند.
-    - اگر Base64 باشد، دیکد کرده، خط به خط آدرس‌ها را جایگزین کرده، دوباره انکد می‌کند.
-    - اگر متن خام باشد، خط به خط جایگزینی انجام می‌دهد.
-
-    نکته کلیدی: فقط آدرس اتصال (address) جایگزین می‌شود.
-    SNI، Host، Path، TLS و سایر پارامترهای حیاتی برای اتصال، دست‌نخورده باقی می‌مانند.
-    این از شکسته شدن TLS/CDN routing جلوگیری می‌کند.
-    """
-    logging.info(f"🔧 [SUB] شروع پردازش محتوا با IP: {selected_ip}")
-
-    if is_base64(content):
-        try:
-            decoded_str = base64.b64decode(content.strip()).decode('utf-8')
-            lines = decoded_str.split('\n')
-            new_lines = [replace_address_in_config_line(line, selected_ip) for line in lines]
-            new_decoded_str = '\n'.join(new_lines)
-            new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
-            logging.info(f"✅ [SUB] پردازش Base64 انجام شد. تنها آدرس اتصال جایگزین شد، SNI/Host حفظ شد.")
-            return new_content
-        except Exception as e:
-            logging.error(f"❌ [SUB] خطا در پردازش Base64: {e} - بازگرداندن محتوای اصلی")
-            return content
-    else:
-        lines = content.split('\n')
-        new_lines = [replace_address_in_config_line(line, selected_ip) for line in lines]
-        new_content = '\n'.join(new_lines)
-        logging.info(f"✅ [SUB] پردازش Raw Text انجام شد. تنها آدرس اتصال جایگزین شد.")
-        return new_content
-
 
 @app.route('/sub/<sub_id>', methods=['GET'])
 def proxy_subscription(sub_id):
-    """
-    Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare.
-
-    تفاوت با نسخه قبلی:
-    - فقط آدرس اتصال (Address) در کانفیگ‌ها جایگزین می‌شود، نه SNI/Host/Domain.
-    - User-Agent واقعی کلاینت (v2rayNG و...) به پنل فوروارد می‌شود تا پاسخ صحیح دریافت شود.
-    - اعتبارسنجی IP تمیز قبل از استفاده.
-    """
+    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
     logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
-    logging.info(f"🔸 [ROUTE] User-Agent کلاینت: {request.headers.get('User-Agent', 'unknown')}")
-
+    
     try:
-        # درخواست به پنل اصلی (با استفاده از PANEL_URL که پورت را هم شامل میشود)
-        panel_url = f"{PANEL_URL}/sub/{sub_id}"
-
-        # فوروارد کردن User-Agent اصلی کلاینت به پنل، در صورت نبود از یک UA پیش‌فرض استفاده می‌شود
-        client_ua = request.headers.get('User-Agent', 'v2rayNG/1.8.12')
-        headers = {'User-Agent': client_ua}
-
+        # درخواست به پنل اصلی روی پورت سابسکریپشن (2096 طبق پیکربندی قبلی شما)
+        panel_url = f"http://{PANEL_SERVER_IP}:2096/sub/{sub_id}"
+        
+        # استفاده از User-Agent مرورگر برای اطمینان از پاسخگویی پنل
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(panel_url, headers=headers, timeout=10, verify=False)
-
+        
         if response.status_code == 200:
-            content = response.text
+            content = response.text.strip()
+            
+            # اگر پنل کانفیگی برنگرداند
+            if not content:
+                logging.error("❌ [SUB] پنل کانفیگی برای این سابسکریپشن برنگرداند!")
+                return Response("Error: No config found", status=500)
+
             selected_ip = get_clean_ip()
-
-            new_content = process_subscription_content(content, selected_ip)
-
+            
+            # تشخیص نوع محتوا (Base64 یا متن خام) و جایگزینی صحیح IP
+            if content.startswith("vless://") or content.startswith("vmess://") or content.startswith("trojan://"):
+                # محتوا متن خام است
+                new_content = content.replace(PANEL_SERVER_IP, selected_ip)
+                logging.info(f"✅ [SUB] IP جایگزین شد (Raw Text): {PANEL_SERVER_IP} -> {selected_ip}")
+            else:
+                # محتوا احتمالا Base64 است
+                try:
+                    decoded_str = base64.b64decode(content).decode('utf-8')
+                    new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
+                    new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
+                    logging.info(f"✅ [SUB] IP جایگزین شد (Base64): {PANEL_SERVER_IP} -> {selected_ip}")
+                except Exception:
+                    # اگر در دیکد کردن خطا داد، همان متن خام را جایگزین کن
+                    new_content = content.replace(PANEL_SERVER_IP, selected_ip)
+                    logging.info(f"✅ [SUB] IP جایگزین شد (Fallback): {PANEL_SERVER_IP} -> {selected_ip}")
+            
             return Response(new_content, mimetype='text/plain', headers={
                 'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Expires': '0',
-                'Profile-Update-Interval': '24',
-                'Subscription-Userinfo': 'upload=0; download=0; total=0; expire=0'
+                'Expires': '0'
             })
         else:
-            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن از پنل: {response.status_code} - {response.text[:200]}")
-            return Response("Error: Unable to fetch subscription", status=502)
-
-    except requests.Timeout:
-        logging.error(f"❌ [SUB] تایم‌اوت در اتصال به پنل برای sub_id={sub_id}")
-        return Response("Error: Panel timeout", status=504)
+            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن: {response.status_code}")
+            return Response("Error: Unable to fetch subscription", status=500)
+            
     except Exception as e:
-        logging.error(f"❌ [SUB] خطا در proxy subscription: {str(e)}", exc_info=True)
+        logging.error(f"❌ [SUB] خطا در proxy subscription: {str(e)}")
         return Response("Error: Internal Server Error", status=500)
 
 @app.route('/health', methods=['GET'])
@@ -673,7 +562,7 @@ def send_welcome(message):
                         logging.error(f"خطا در صدور لینک کلاینت از پنل برای کاربر {referrer_id}")
                 except Exception as db_error:
                     logging.error(f"خطای جدی دیتابیس. عملیات صدور لایسنس لغو شد: {db_error}")
-
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton("🛒 خرید اشتراک پرسرعت"),
@@ -918,7 +807,7 @@ def handle_receipt(message):
         final_price = original_price - int(original_price * (discount_percent / 100))
         price_str = format_price(final_price)
         discount_text = f"\n🎁 تخفیف: {applied_code}"
-
+    
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("✅ تایید و صدور", callback_data=f"adm_approve_{message.chat.id}_{plan_key}_{applied_code}"),
