@@ -8,6 +8,7 @@ import urllib3
 import random
 import string
 import time
+import base64
 from datetime import datetime
 import jdatetime
 import os
@@ -32,14 +33,14 @@ SECRET_PATH = os.getenv("SECRET_PATH")
 API_TOKEN = os.getenv("API_TOKEN")
 INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 
-# استخراج خودکار آی‌پی سرور از PANEL_URL (نیاز به دستکاری .env نیست)
+# استخراج خودکار آی‌پی سرور از PANEL_URL
 PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
 
 # دریافت لیست IPها از .env و تبدیل به لیست
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
 CLEAN_IPS = [ip.strip() for ip in CLEAN_IP_STR.split(",") if ip.strip()]
 
-# آدرس API برای دریافت IP تمیز (به عنوان نمونه از ircf.space استفاده شده)
+# آدرس API برای دریافت IP تمیز
 CLEAN_IP_API = os.getenv("CLEAN_IP_API", "https://api.ircf.space/v1/host")
 
 WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
@@ -336,7 +337,7 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
-                # پورت 80 به صورت پیش‌فرض برای HTTP است، نیاز به ذکر پورت نیست
+                # لینک سابسکریپشن با پورت 80 (بدون ذکر پورت چون 80 پیش‌فرض HTTP است)
                 sub_link = f"http://{PANEL_SERVER_IP}/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
@@ -347,6 +348,14 @@ def create_vless_link(email, limit_gb, expiry_days=30):
 
 # ==================== [ Flask Proxy برای سابسکریپشن با IPهای رندوم ] ====================
 app = Flask(__name__)
+
+def is_base64(s):
+    """بررسی میکند که آیا متن ورودی Base64 است یا خیر"""
+    try:
+        decoded = base64.b64decode(s, validate=True).decode('utf-8')
+        return '://' in decoded
+    except Exception:
+        return False
 
 def get_clean_ip():
     """تابع دریافت IP تمیز از API و در صورت شکست، استفاده از لیست فایل env"""
@@ -373,17 +382,31 @@ def proxy_subscription(sub_id):
     logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
     
     try:
-        # درخواست به پنل اصلی (با توجه به PANEL_URL موجود در .env)
+        # درخواست به پنل اصلی (با استفاده از PANEL_URL که پورت را هم شامل میشود)
         panel_url = f"{PANEL_URL}/sub/{sub_id}"
-        response = requests.get(panel_url, timeout=10, verify=False)
+        
+        # استفاده از User-Agent مخصوص v2rayNG تا پنل کانفیگ را به درستی برگرداند
+        headers = {'User-Agent': 'v2rayNG/1.8.12'}
+        response = requests.get(panel_url, headers=headers, timeout=10, verify=False)
         
         if response.status_code == 200:
             content = response.text
             selected_ip = get_clean_ip()
             
-            # جایگزینی IP سرور اصلی با IP تمیز
-            new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-            logging.info(f"✅ [SUB] IP جایگزین شد: {PANEL_SERVER_IP} -> {selected_ip}")
+            # ----- رفع باگ خراب شدن Base64 -----
+            if is_base64(content):
+                # دیکد کردن Base64
+                decoded_str = base64.b64decode(content).decode('utf-8')
+                # جایگزینی آی‌پی پنل و دامنه پنل با آی‌پی تمیز
+                new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
+                # انکد مجدد به Base64
+                new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
+                logging.info(f"✅ [SUB] IP جایگزین شد (Base64): {PANEL_SERVER_IP} -> {selected_ip}")
+            else:
+                # اگر پنل متن خام برگرداند
+                new_content = content.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
+                logging.info(f"✅ [SUB] IP جایگزین شد (Raw Text): {PANEL_SERVER_IP} -> {selected_ip}")
+            # ------------------------------------
             
             return Response(new_content, mimetype='text/plain', headers={
                 'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
