@@ -9,6 +9,7 @@ import random
 import string
 import time
 import base64
+import re
 from datetime import datetime
 import jdatetime
 import os
@@ -35,6 +36,9 @@ INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 
 # استخراج خودکار آی‌پی سرور از PANEL_URL
 PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
+
+# پورتی که پنل شما سابسکریپشن‌ها را روی آن سرو می‌کند (طبق کد اولیه شما 2096 است)
+SUB_PORT = os.getenv("SUB_PORT", "2096")
 
 # دریافت لیست IPها از .env و تبدیل به لیست
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
@@ -349,13 +353,25 @@ def create_vless_link(email, limit_gb, expiry_days=30):
 # ==================== [ Flask Proxy برای سابسکریپشن با IPهای رندوم ] ====================
 app = Flask(__name__)
 
+def is_valid_ip(ip):
+    """بررسی میکند که آیا فرمت آی‌پی صحیح است یا خیر"""
+    return re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip) is not None
+
 def get_clean_ip():
     """تابع دریافت IP تمیز از API و در صورت شکست، استفاده از لیست فایل env"""
     try:
         response = requests.get(CLEAN_IP_API, timeout=5, verify=False)
         if response.status_code == 200:
             ip = response.text.strip()
-            if ip:
+            # برخی APIها ممکن است JSON برگردانند
+            try:
+                data = json.loads(ip)
+                if isinstance(data, dict):
+                    ip = data.get('host') or data.get('ip') or data.get('Host') or ""
+            except:
+                pass # اگر JSON نباشد، همان متن خام است
+            
+            if is_valid_ip(ip):
                 logging.info(f"🔹 [SUB] IP تمیز از API دریافت شد: {ip}")
                 return ip
     except Exception as e:
@@ -374,43 +390,47 @@ def proxy_subscription(sub_id):
     logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
     
     try:
-        # درخواست مستقیم به پنل اصلی با استفاده از آدرس کامل پنل (پورت 8585)
-        panel_url = f"{PANEL_URL}/sub/{sub_id}"
+        # درخواست به پنل اصلی روی پورت سابسکریپشن (2096)
+        panel_sub_url = f"http://{PANEL_SERVER_IP}:{SUB_PORT}/sub/{sub_id}"
+        logging.info(f"🔹 [SUB] درخواست به پنل: {panel_sub_url}")
         
-        # استفاده از User-Agent مخصوص v2rayNG
+        # استفاده از User-Agent مخصوص v2rayNG برای اطمینان از پاسخگویی پنل
         headers = {'User-Agent': 'v2rayNG/1.8.12'}
-        response = requests.get(panel_url, headers=headers, timeout=10, verify=False)
+        response = requests.get(panel_sub_url, headers=headers, timeout=10, verify=False)
         
         if response.status_code == 200:
             content = response.text.strip()
+            logging.info(f"🔹 [SUB] پاسخ پنل دریافت شد. طول محتوا: {len(content)} بایت")
             
+            # اگر پنل کانفیگی برنگرداند
             if not content:
                 logging.error("❌ [SUB] پنل کانفیگی برای این سابسکریپشن برنگرداند!")
                 return Response("Error: No config found", status=500)
 
             selected_ip = get_clean_ip()
+            logging.info(f"🔹 [SUB] IP انتخاب شده برای جایگزینی: {selected_ip}")
             
             # تشخیص هوشمند نوع کانفیگ برای جایگزینی صحیح IP
-            if content.startswith("vless://") or content.startswith("vmess://") or content.startswith("trojan://"):
-                # محتوا متن خام است
-                new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                logging.info(f"✅ [SUB] IP جایگزین شد (Raw Text)")
+            is_base64 = False
+            decoded_str = ""
+            try:
+                decoded_bytes = base64.b64decode(content, validate=True)
+                decoded_str = decoded_bytes.decode('utf-8')
+                if '://' in decoded_str:
+                    is_base64 = True
+            except Exception:
+                pass # محتوا Base64 نیست
+                
+            if is_base64:
+                # جایگزینی آی‌پی پنل و دامنه با آی‌پی تمیز
+                new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
+                # انکود مجدد به Base64
+                new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
+                logging.info(f"✅ [SUB] IP در Base64 جایگزین شد.")
             else:
-                # محتوا احتمالا Base64 است
-                try:
-                    decoded_str = base64.b64decode(content).decode('utf-8')
-                    if '://' in decoded_str:
-                        # جایگزینی IP در متن دیکد شده
-                        new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
-                        # انکود مجدد به Base64
-                        new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
-                        logging.info(f"✅ [SUB] IP جایگزین شد (Base64)")
-                    else:
-                        new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                except Exception:
-                    # در صورت باینری بودن یا خطا
-                    new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                    logging.info(f"✅ [SUB] IP جایگزین شد (Fallback)")
+                # اگر محتوا متن خام باشد (vless:// یا vmess://)
+                new_content = content.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
+                logging.info(f"✅ [SUB] IP در متن خام جایگزین شد.")
             
             return Response(new_content, mimetype='text/plain', headers={
                 'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
@@ -418,11 +438,11 @@ def proxy_subscription(sub_id):
                 'Expires': '0'
             })
         else:
-            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن: {response.status_code}")
+            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن از پنل. کد وضعیت: {response.status_code}")
             return Response("Error: Unable to fetch subscription", status=500)
             
     except Exception as e:
-        logging.error(f"❌ [SUB] خطا در proxy subscription: {str(e)}")
+        logging.error(f"❌ [SUB] خطای کلی در proxy subscription: {str(e)}")
         return Response("Error: Internal Server Error", status=500)
 
 @app.route('/health', methods=['GET'])
