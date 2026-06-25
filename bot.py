@@ -337,7 +337,7 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
-                # لینک سابسکریپشن با پورت 80 (بدون ذکر پورت چون 80 پیش‌فرض HTTP است)
+                # لینک سابسکریپشن با پورت 80 (پورت پیش‌فرض Flask)
                 sub_link = f"http://{PANEL_SERVER_IP}/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
@@ -374,39 +374,43 @@ def proxy_subscription(sub_id):
     logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
     
     try:
-        # درخواست به پنل اصلی روی پورت سابسکریپشن (2096 طبق پیکربندی قبلی شما)
-        panel_url = f"http://{PANEL_SERVER_IP}:2096/sub/{sub_id}"
+        # درخواست مستقیم به پنل اصلی با استفاده از آدرس کامل پنل (پورت 8585)
+        panel_url = f"{PANEL_URL}/sub/{sub_id}"
         
-        # استفاده از User-Agent مرورگر برای اطمینان از پاسخگویی پنل
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        # استفاده از User-Agent مخصوص v2rayNG
+        headers = {'User-Agent': 'v2rayNG/1.8.12'}
         response = requests.get(panel_url, headers=headers, timeout=10, verify=False)
         
         if response.status_code == 200:
             content = response.text.strip()
             
-            # اگر پنل کانفیگی برنگرداند
             if not content:
                 logging.error("❌ [SUB] پنل کانفیگی برای این سابسکریپشن برنگرداند!")
                 return Response("Error: No config found", status=500)
 
             selected_ip = get_clean_ip()
             
-            # تشخیص نوع محتوا (Base64 یا متن خام) و جایگزینی صحیح IP
+            # تشخیص هوشمند نوع کانفیگ برای جایگزینی صحیح IP
             if content.startswith("vless://") or content.startswith("vmess://") or content.startswith("trojan://"):
                 # محتوا متن خام است
                 new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                logging.info(f"✅ [SUB] IP جایگزین شد (Raw Text): {PANEL_SERVER_IP} -> {selected_ip}")
+                logging.info(f"✅ [SUB] IP جایگزین شد (Raw Text)")
             else:
                 # محتوا احتمالا Base64 است
                 try:
                     decoded_str = base64.b64decode(content).decode('utf-8')
-                    new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
-                    new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
-                    logging.info(f"✅ [SUB] IP جایگزین شد (Base64): {PANEL_SERVER_IP} -> {selected_ip}")
+                    if '://' in decoded_str:
+                        # جایگزینی IP در متن دیکد شده
+                        new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
+                        # انکود مجدد به Base64
+                        new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
+                        logging.info(f"✅ [SUB] IP جایگزین شد (Base64)")
+                    else:
+                        new_content = content.replace(PANEL_SERVER_IP, selected_ip)
                 except Exception:
-                    # اگر در دیکد کردن خطا داد، همان متن خام را جایگزین کن
+                    # در صورت باینری بودن یا خطا
                     new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                    logging.info(f"✅ [SUB] IP جایگزین شد (Fallback): {PANEL_SERVER_IP} -> {selected_ip}")
+                    logging.info(f"✅ [SUB] IP جایگزین شد (Fallback)")
             
             return Response(new_content, mimetype='text/plain', headers={
                 'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
