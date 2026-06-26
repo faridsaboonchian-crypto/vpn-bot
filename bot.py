@@ -341,7 +341,6 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         if response.status_code == 200:
             res_data = response.json()
             if res_data.get('success') == True:
-                # لینک سابسکریپشن با پورت 80 (پورت پیش‌فرض Flask)
                 sub_link = f"http://{PANEL_SERVER_IP}/sub/{sub_id}"
                 logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
                 return sub_link
@@ -384,6 +383,10 @@ def get_clean_ip():
     
     return "188.114.97.2" # آی‌پی پیش‌فرض اضطراری
 
+@app.route('/test')
+def test_route():
+    return "Flask is running correctly on port 80!"
+
 @app.route('/sub/<sub_id>', methods=['GET'])
 def proxy_subscription(sub_id):
     """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
@@ -405,32 +408,32 @@ def proxy_subscription(sub_id):
             # اگر پنل کانفیگی برنگرداند
             if not content:
                 logging.error("❌ [SUB] پنل کانفیگی برای این سابسکریپشن برنگرداند!")
-                return Response("Error: No config found", status=500)
+                return Response("Error: No config found", status=500, mimetype='text/plain')
 
             selected_ip = get_clean_ip()
             logging.info(f"🔹 [SUB] IP انتخاب شده برای جایگزینی: {selected_ip}")
             
             # تشخیص هوشمند نوع کانفیگ برای جایگزینی صحیح IP
-            is_base64 = False
-            decoded_str = ""
-            try:
-                decoded_bytes = base64.b64decode(content, validate=True)
-                decoded_str = decoded_bytes.decode('utf-8')
-                if '://' in decoded_str:
-                    is_base64 = True
-            except Exception:
-                pass # محتوا Base64 نیست
-                
-            if is_base64:
-                # جایگزینی آی‌پی پنل و دامنه با آی‌پی تمیز
-                new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
-                # انکود مجدد به Base64
-                new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
-                logging.info(f"✅ [SUB] IP در Base64 جایگزین شد.")
-            else:
-                # اگر محتوا متن خام باشد (vless:// یا vmess://)
-                new_content = content.replace(PANEL_SERVER_IP, selected_ip).replace(WS_DOMAIN, selected_ip)
+            # اگر متن شامل آی‌پی سرور باشد (متن خام است)
+            if PANEL_SERVER_IP in content:
+                new_content = content.replace(PANEL_SERVER_IP, selected_ip)
                 logging.info(f"✅ [SUB] IP در متن خام جایگزین شد.")
+            else:
+                # احتمالا محتوا Base64 است
+                try:
+                    decoded_str = base64.b64decode(content).decode('utf-8')
+                    if PANEL_SERVER_IP in decoded_str:
+                        # جایگزینی آی‌پی در متن دیکد شده
+                        new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
+                        # انکود مجدد به Base64
+                        new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
+                        logging.info(f"✅ [SUB] IP در Base64 جایگزین شد.")
+                    else:
+                        new_content = content
+                        logging.info(f"⚠️ [SUB] آی‌پی در کانفیگ پیدا نشد!")
+                except Exception:
+                    new_content = content
+                    logging.info(f"⚠️ [SUB] خطا در دیکد Base64، محتوای اصلی برگردانده شد.")
             
             return Response(new_content, mimetype='text/plain', headers={
                 'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
@@ -439,15 +442,11 @@ def proxy_subscription(sub_id):
             })
         else:
             logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن از پنل. کد وضعیت: {response.status_code}")
-            return Response("Error: Unable to fetch subscription", status=500)
+            return Response(f"Error: Panel returned {response.status_code}", status=500, mimetype='text/plain')
             
     except Exception as e:
         logging.error(f"❌ [SUB] خطای کلی در proxy subscription: {str(e)}")
-        return Response("Error: Internal Server Error", status=500)
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return Response("Flask is running - OK", status=200, mimetype='text/plain')
+        return Response(f"Error: {str(e)}", status=500, mimetype='text/plain')
 
 @app.errorhandler(404)
 def not_found(e):
