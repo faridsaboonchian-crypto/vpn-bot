@@ -39,7 +39,7 @@ PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.3")
 CLEAN_IPS = [ip.strip() for ip in CLEAN_IP_STR.split(",") if ip.strip()]
 
-# آدرس API برای دریافت IP تمیز (به عنوان پشتیبان)
+# آدرس API برای دریافت IP تمیز
 CLEAN_IP_API = os.getenv("CLEAN_IP_API", "https://api.ircf.space/v1/host")
 
 WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
@@ -90,6 +90,8 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN has_received_test INTEGER DEFAULT 0")
     if "has_received_referral_reward" not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN has_received_referral_reward INTEGER DEFAULT 0")
+    if "vless_uuid" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN vless_uuid TEXT")
     conn.commit()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_discounts (
@@ -145,7 +147,7 @@ def mark_discount_used(chat_id, code):
 def get_user(chat_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT referred_by, invite_count, has_received_test, has_received_referral_reward FROM users WHERE chat_id = ?", (str(chat_id),))
+    cursor.execute("SELECT referred_by, invite_count, has_received_test, has_received_referral_reward, vless_uuid FROM users WHERE chat_id = ?", (str(chat_id),))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -153,7 +155,8 @@ def get_user(chat_id):
             "referred_by": row[0],
             "invite_count": row[1],
             "has_received_test": row[2],
-            "has_received_referral_reward": row[3]
+            "has_received_referral_reward": row[3],
+            "vless_uuid": row[4]
         }
     return None
 
@@ -173,6 +176,16 @@ def add_or_update_user(chat_id, first_name, username, referred_by=None):
         conn.commit()
     except Exception as e:
         logging.error(f"خطا در ثبت/بروزرسانی کاربر در SQLite: {e}")
+    conn.close()
+
+def save_vless_uuid(chat_id, uuid_str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE users SET vless_uuid = ? WHERE chat_id = ?", (uuid_str, str(chat_id)))
+        conn.commit()
+    except Exception as e:
+        logging.error(f"خطا در ذخیره UUID: {e}")
     conn.close()
 
 def set_received_referral_reward(chat_id):
@@ -309,13 +322,11 @@ def is_valid_ip(ip):
     return re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip) is not None
 
 def get_clean_ip():
-    # اولویت اول: لیست آی‌پی‌های ثابت در فایل .env
     if CLEAN_IPS:
         selected = random.choice(CLEAN_IPS)
         logging.info(f"🔹 IP از لیست ثابت انتخاب شد: {selected}")
         return selected
         
-    # اولویت دوم: API سایت مرجع
     try:
         response = requests.get(CLEAN_IP_API, timeout=5, verify=False)
         if response.status_code == 200:
@@ -332,7 +343,7 @@ def get_clean_ip():
     except Exception as e:
         logging.warning(f"⚠️ خطا در دریافت IP از API: {e}")
     
-    return "188.114.97.3" # آی‌پی پیش‌فرض اضطراری
+    return "188.114.97.3"
 
 def get_inbound_settings():
     url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/inbounds/list"
@@ -349,9 +360,39 @@ def get_inbound_settings():
         logging.error(f"خطا در دریافت تنظیمات Inbound: {e}")
     return None
 
-def create_vless_link(email, limit_gb, expiry_days=30):
+def generate_vless_link_from_uuid(client_uuid, email_name="Sanatify"):
+    """ساخت لینک VLESS با استفاده از UUID موجود (برای تعویض آی‌پی)"""
+    inbound = get_inbound_settings()
+    if not inbound:
+        return None
+
+    port = inbound.get("port", 443)
+    stream = inbound.get("streamSettings", {})
+    network = stream.get("network", "ws")
+    security = stream.get("security", "tls")
+    
+    path = stream.get("wsSettings", {}).get("path", WS_PATH)
+    host = stream.get("wsSettings", {}).get("headers", {}).get("Host", WS_DOMAIN)
+    
+    clean_ip = get_clean_ip()
+    name = quote(f"{email_name}")
+    path_enc = quote(path, safe='')
+    
+    params = {
+        "encryption": "none",
+        "type": network,
+        "security": security,
+        "host": host,
+        "path": path_enc
+    }
+    if security == "tls":
+        params["sni"] = host
+        
+    query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"vless://{client_uuid}@{clean_ip}:{port}?{query_string}#{name}"
+
+def create_vless_link(chat_id, email, limit_gb, expiry_days=30):
     try:
-        # ۱. ثبت کاربر در پنل
         add_url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/clients/add"
         client_uuid = str(uuid.uuid4())
         traffic_bytes = int(limit_gb * 1024 * 1024 * 1024)
@@ -368,40 +409,8 @@ def create_vless_link(email, limit_gb, expiry_days=30):
         response = requests.post(add_url, json=payload, headers=headers, timeout=10, verify=False)
         
         if response.status_code == 200 and response.json().get('success'):
-            # ۲. گرفتن تنظیمات سرور (پورت، مسیر، شبکه)
-            inbound = get_inbound_settings()
-            if not inbound:
-                logging.error("تنظیمات Inbound یافت نشد!")
-                return None
-
-            port = inbound.get("port", 443)
-            stream = inbound.get("streamSettings", {})
-            network = stream.get("network", "ws")
-            security = stream.get("security", "tls")
-            
-            path = stream.get("wsSettings", {}).get("path", WS_PATH)
-            host = stream.get("wsSettings", {}).get("headers", {}).get("Host", WS_DOMAIN)
-            
-            # ۳. دریافت آی‌پی تمیز
-            clean_ip = get_clean_ip()
-            
-            # ۴. ساخت لینک VLESS مستقیم
-            name = quote(f"Sanatify-{email}")
-            path_enc = quote(path, safe='')
-            
-            params = {
-                "encryption": "none",
-                "type": network,
-                "security": security,
-                "host": host,
-                "path": path_enc
-            }
-            if security == "tls":
-                params["sni"] = host
-                
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-            vless_link = f"vless://{client_uuid}@{clean_ip}:{port}?{query_string}#{name}"
-            
+            save_vless_uuid(chat_id, client_uuid) # ذخیره UUID برای تعویض آی‌پی آینده
+            vless_link = generate_vless_link_from_uuid(client_uuid, f"Sanatify-{email}")
             logging.info(f"✅ لینک کانفیگ مستقیم ساخته شد: {vless_link[:50]}...")
             return vless_link
             
@@ -512,7 +521,7 @@ def send_welcome(message):
                     suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
                     free_username = f"free_{referrer_id}_{suffix}"
                     bot.send_message(ADMIN_CHAT_ID, f"🎁 <b>یک لایسنس هدیه ۲ گیگی ۱ روزه</b> به طور خودکار برای کاربر `{referrer_id}` به دلیل دعوت ۳ نفر صادر شد.")
-                    vless_link = create_vless_link(free_username, limit_gb=2, expiry_days=1)
+                    vless_link = create_vless_link(referrer_id, free_username, limit_gb=2, expiry_days=1)
                     if vless_link:
                         gift_text = (
                             "🎉 <b>تبریک فراوان! شما با موفقیت ۳ کاربر را به ربات دعوت کردید.</b>\n\n"
@@ -533,8 +542,10 @@ def send_welcome(message):
     markup.add(
         types.KeyboardButton("🛒 خرید اشتراک"),
         types.KeyboardButton("📊 وضعیت اشتراک"),
+        types.KeyboardButton("🔄 تعویض آی‌پی تمیز"),
         types.KeyboardButton("🎁 دعوت دوستان"),
         types.KeyboardButton("📚 راهنمای اتصال"),
+        types.KeyboardButton("🎮 گیمینگ و ترید"),
         types.KeyboardButton("📞 پشتیبانی")
     )
     welcome_text = (
@@ -543,6 +554,52 @@ def send_welcome(message):
         "💡 برای خرید اشتراک یا بررسی وضعیت خود، از منوی زیر استفاده نمایید:"
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == "🔄 تعویض آی‌پی تمیز")
+def renew_ip_config(message):
+    if is_spammer(message.from_user.id, cooldown=5.0):
+        return
+    chat_id = str(message.chat.id)
+    user_data = get_user(chat_id)
+    if not user_data or not user_data.get("vless_uuid"):
+        bot.send_message(chat_id, "❌ شما در حال حاضر اشتراک فعالی ندارید که بتوان آی‌پی آن را تعویض کرد.\nجهت خرید از منوی اصلی استفاده کنید.")
+        return
+
+    bot.send_message(chat_id, "⏳ در حال دریافت یک آی‌پی تمیز و جدید از سرور... لطفاً چند ثانیه صبر کنید.")
+    new_link = generate_vless_link_from_uuid(user_data["vless_uuid"], "Sanatify-NewIP")
+    if new_link:
+        success_text = (
+            "✅ <b>آی‌پی شما با موفقیت تعویض شد!</b>\n\n"
+            "🚀 <b>لینک کانفیگ جدید شما:</b>\n\n"
+            f"<code>{new_link}</code>\n\n"
+            "⚠️ <b>نکته:</b> لینک قبلی را از برنامه خود پاک کنید و این لینک جدید را از طریق کلیپ‌بورد وارد کنید. حجم و روزهای باقیمانده شما کاملاً حفظ شده است."
+        )
+        bot.send_message(chat_id, success_text, parse_mode="HTML")
+    else:
+        bot.send_message(chat_id, "❌ متأسفانه در حال حاضر امکان تعویض آی‌پی وجود ندارد. لطفاً بعداً تلاش کنید.")
+
+@bot.message_handler(func=lambda message: message.text == "🎮 گیمینگ و ترید")
+def gaming_trading_guide(message):
+    if is_spammer(message.from_user.id):
+        return
+    guide_text = (
+        "🎮 <b>راهنمای کاهش پینگ برای گیمرها و تریدرها</b>\n\n"
+        "برای داشتن پایین‌ترین پینگ (Ping) و جلوگیری از پکت لاس (Packet Loss) در بازی‌ها و ترید، تنظیمات زیر را در برنامه v2rayNG انجام دهید:\n\n"
+        "۱. <b>فعال‌سازی Fragment (تکه‌تکه کردن بسته‌ها):</b>\n"
+        "   - وارد تنظیمات برنامه (۳ نقطه بالا) شوید.\n"
+        "   - بخش <code>Fragmentation</code> را روشن کنید.\n"
+        "   - Length را روی <code>10-100</code> و Interval را روی <code>10-100</code> تنظیم کنید. (در صورت افت سرعت، اعداد را کمی بالا ببرید).\n\n"
+        "۲. <b>خاموش کردن Mux (مولتی‌پلکسر):</b>\n"
+        "   - وارد تنظیمات کانفیگ خود (Tap on config) شوید.\n"
+        "   - مطمئن شوید گزینه <code>Mux</code> خاموش است. (Mux برای مرور وب خوب است اما برای گیم پینگ را بالا می‌برد).\n\n"
+        "۳. <b>تنظیمات Routing (مسیریابی):</b>\n"
+        "   - در تنظیمات برنامه، بخش <code>Routing</code> را باز کنید.\n"
+        "   - مطمئن شوید سایت‌های ایران (GeoSite:ir) روی حالت <code>Direct</code> (اتصال مستقیم) هستند تا پینگ بازی‌های ایرانی بالا نرود.\n\n"
+        "۴. <b>انتخاب سرور مناسب:</b>\n"
+        "   - برای بازی‌های بین‌المللی و ترید، سرورهای آلمان و فرانسه بهترین پینگ را دارند. کانفیگ‌های ما از سرور آلمان استفاده می‌کنند.\n\n"
+        "🔄 <b>نکته طلایی:</b> اگر حس کردید پینگ بالا رفته، از دکمه <b>«🔄 تعویض آی‌پی تمیز»</b> در منوی اصلی ربات استفاده کنید تا یک آی‌پی جدید با مسیر بهتر دریافت کنید!"
+    )
+    bot.send_message(message.chat.id, guide_text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda message: message.text == "📚 راهنمای اتصال")
 def connection_guide(message):
@@ -564,7 +621,9 @@ def connection_guide(message):
         "۲. لینک کپی‌شده را از طریق علامت + در برنامه پیست (Import) کنید.\n\n"
         "💻 <b>سیستم‌عامل ویندوز (کامپیوتر):</b>\n"
         "۱. برنامه <b>v2rayN</b> را دانلود و اجرا کنید.\n"
-        "۲. از منوی برنامه گزینه Import from clipboard را انتخاب کنید."
+        "۲. از منوی برنامه گزینه Import from clipboard را انتخاب کنید.\n\n"
+        "⚠️ <b>اگر اینترنت قطع شد یا کند شد:</b>\n"
+        "نیازی به خرید اشتراک جدید نیست! فقط از منوی اصلی روی دکمه <b>«🔄 تعویض آی‌پی تمیز»</b> بزنید تا کانفیگ با یک آی‌پی جدید و سالم جایگزین شود."
     )
     bot.send_message(message.chat.id, guide_text, parse_mode="HTML")
 
@@ -590,7 +649,7 @@ def handle_free_features(call):
         user_data = get_user(chat_id)
         if not user_data:
             add_or_update_user(chat_id, call.from_user.first_name or "کاربر ناشناس", call.from_user.username)
-            user_data = {"has_received_test": 0, "invite_count": 0, "has_received_referral_reward": 0, "referred_by": None}
+            user_data = {"has_received_test": 0, "invite_count": 0, "has_received_referral_reward": 0, "referred_by": None, "vless_uuid": None}
         if user_data.get("has_received_test", 0) == 1:
             bot.answer_callback_query(call.id, "❌ شما قبلاً اکانت تست خود را دریافت کرده‌اید.", show_alert=True)
             return
@@ -598,7 +657,7 @@ def handle_free_features(call):
         bot.edit_message_text("⏳ در حال صدور اکانت تست رایگان (۱ گیگابایت)... لطفاً صبر کنید.", call.message.chat.id, call.message.message_id)
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
         test_username = f"free_test_{chat_id}_{suffix}"
-        vless_link = create_vless_link(test_username, limit_gb=1, expiry_days=1)
+        vless_link = create_vless_link(chat_id, test_username, limit_gb=1, expiry_days=1)
         if vless_link:
             set_received_test(chat_id)
             success_text = (
@@ -775,7 +834,7 @@ def handle_admin_action(call):
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
         unique_username = f"user_{target_user_id}_{suffix}"
-        vless_link = create_vless_link(unique_username, limit_gb=PLANS[plan_key]['gb'], expiry_days=PLANS[plan_key]['days'])
+        vless_link = create_vless_link(target_user_id, unique_username, limit_gb=PLANS[plan_key]['gb'], expiry_days=PLANS[plan_key]['days'])
         if vless_link:
             if discount_code != "none" and discount_code in DISCOUNT_CODES:
                 mark_discount_used(target_user_id, discount_code)
