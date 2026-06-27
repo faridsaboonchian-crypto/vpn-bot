@@ -8,7 +8,6 @@ import urllib3
 import random
 import string
 import time
-import base64
 import re
 from datetime import datetime
 import jdatetime
@@ -16,8 +15,7 @@ import os
 from dotenv import load_dotenv
 import sqlite3
 import threading
-from flask import Flask, Response, request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 # بارگذاری متغیرهای محیطی
 load_dotenv(dotenv_path="/root/.env")
@@ -36,9 +34,6 @@ INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 
 # استخراج خودکار آی‌پی سرور از PANEL_URL
 PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
-
-# پورتی که پنل شما سابسکریپشن‌ها را روی آن سرو می‌کند (طبق کد اولیه شما 2096 است)
-SUB_PORT = os.getenv("SUB_PORT", "2096")
 
 # دریافت لیست IPها از .env و تبدیل به لیست
 CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
@@ -309,162 +304,108 @@ def test_api():
     except Exception as e:
         logging.error(f"خطا در تست API: {e}")
 
-# ==================== [ تابع ساخت سابسکریپشن ] ====================
-def create_vless_link(email, limit_gb, expiry_days=30):
-    try:
-        add_url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/clients/add"
-        client_uuid = str(uuid.uuid4())
-        sub_id = generate_sub_id()
-        traffic_bytes = int(limit_gb * 1024 * 1024 * 1024)
-        expiry_time_ms = -int(expiry_days * 24 * 60 * 60 * 1000)
-        payload = {
-            "client": {
-                "id": client_uuid,
-                "email": email,
-                "flow": "",
-                "limitIp": 2,
-                "totalGB": traffic_bytes,
-                "expiryTime": expiry_time_ms,
-                "enable": True,
-                "tgId": 0,
-                "subId": sub_id
-            },
-            "inboundIds": [INBOUND_ID]
-        }
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {API_TOKEN}"
-        }
-        response = requests.post(add_url, json=payload, headers=headers, timeout=10, verify=False)
-        logging.info(f"وضعیت پاسخ پنل: {response.status_code}")
-        
-        if response.status_code == 200:
-            res_data = response.json()
-            if res_data.get('success') == True:
-                sub_link = f"http://{PANEL_SERVER_IP}/sub/{sub_id}"
-                logging.info(f"سابسکریپشن ساخته شد: {sub_link}")
-                return sub_link
-        return None
-    except Exception as e:
-        logging.error(f"خطای سرور: {str(e)}")
-        return None
-
-# ==================== [ Flask Proxy برای سابسکریپشن با IPهای رندوم ] ====================
-app = Flask(__name__)
-
+# ==================== [ توابع ساخت کانفیگ مستقیم VLESS ] ====================
 def is_valid_ip(ip):
-    """بررسی میکند که آیا فرمت آی‌پی صحیح است یا خیر"""
     return re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip) is not None
 
 def get_clean_ip():
-    """تابع دریافت IP تمیز از API و در صورت شکست، استفاده از لیست فایل env"""
     try:
         response = requests.get(CLEAN_IP_API, timeout=5, verify=False)
         if response.status_code == 200:
             ip = response.text.strip()
-            # برخی APIها ممکن است JSON برگردانند
             try:
                 data = json.loads(ip)
                 if isinstance(data, dict):
                     ip = data.get('host') or data.get('ip') or data.get('Host') or ""
             except:
-                pass # اگر JSON نباشد، همان متن خام است
-            
+                pass
             if is_valid_ip(ip):
-                logging.info(f"🔹 [SUB] IP تمیز از API دریافت شد: {ip}")
+                logging.info(f"🔹 IP تمیز از API دریافت شد: {ip}")
                 return ip
     except Exception as e:
-        logging.warning(f"⚠️ [SUB] خطا در دریافت IP از API، استفاده از لیست ثابت: {e}")
+        logging.warning(f"⚠️ خطا در دریافت IP از API، استفاده از لیست ثابت: {e}")
     
     if CLEAN_IPS:
         selected = random.choice(CLEAN_IPS)
-        logging.info(f"🔹 [SUB] IP از لیست ثابت انتخاب شد: {selected}")
+        logging.info(f"🔹 IP از لیست ثابت انتخاب شد: {selected}")
         return selected
-    
-    return "188.114.97.2" # آی‌پی پیش‌فرض اضطراری
+    return "188.114.97.2"
 
-@app.route('/test')
-def test_route():
-    return "Flask is running correctly on port 80!"
-
-@app.route('/sub/<sub_id>', methods=['GET'])
-def proxy_subscription(sub_id):
-    """Endpoint برای دریافت سابسکریپشن با IPهای Cloudflare"""
-    logging.info(f"🔸 [ROUTE] دریافت درخواست برای /sub/{sub_id}")
-    
+def get_inbound_settings():
+    url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/inbounds/list"
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {API_TOKEN}"}
     try:
-        # درخواست به پنل اصلی روی پورت سابسکریپشن (2096)
-        panel_sub_url = f"http://{PANEL_SERVER_IP}:{SUB_PORT}/sub/{sub_id}"
-        logging.info(f"🔹 [SUB] درخواست به پنل: {panel_sub_url}")
-        
-        # استفاده از User-Agent مخصوص v2rayNG برای اطمینان از پاسخگویی پنل
-        headers = {'User-Agent': 'v2rayNG/1.8.12'}
-        response = requests.get(panel_sub_url, headers=headers, timeout=10, verify=False)
-        
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
         if response.status_code == 200:
-            content = response.text.strip()
-            logging.info(f"🔹 [SUB] پاسخ پنل دریافت شد. طول محتوا: {len(content)} بایت")
-            
-            # اگر پنل کانفیگی برنگرداند
-            if not content:
-                logging.error("❌ [SUB] پنل کانفیگی برای این سابسکریپشن برنگرداند!")
-                return Response("Error: No config found", status=500, mimetype='text/plain')
-
-            selected_ip = get_clean_ip()
-            logging.info(f"🔹 [SUB] IP انتخاب شده برای جایگزینی: {selected_ip}")
-            
-            # تشخیص هوشمند نوع کانفیگ برای جایگزینی صحیح IP
-            # اگر متن شامل آی‌پی سرور باشد (متن خام است)
-            if PANEL_SERVER_IP in content:
-                new_content = content.replace(PANEL_SERVER_IP, selected_ip)
-                logging.info(f"✅ [SUB] IP در متن خام جایگزین شد.")
-            else:
-                # احتمالا محتوا Base64 است
-                try:
-                    decoded_str = base64.b64decode(content).decode('utf-8')
-                    if PANEL_SERVER_IP in decoded_str:
-                        # جایگزینی آی‌پی در متن دیکد شده
-                        new_decoded_str = decoded_str.replace(PANEL_SERVER_IP, selected_ip)
-                        # انکود مجدد به Base64
-                        new_content = base64.b64encode(new_decoded_str.encode('utf-8')).decode('utf-8')
-                        logging.info(f"✅ [SUB] IP در Base64 جایگزین شد.")
-                    else:
-                        new_content = content
-                        logging.info(f"⚠️ [SUB] آی‌پی در کانفیگ پیدا نشد!")
-                except Exception:
-                    new_content = content
-                    logging.info(f"⚠️ [SUB] خطا در دیکد Base64، محتوای اصلی برگردانده شد.")
-            
-            return Response(new_content, mimetype='text/plain', headers={
-                'Content-Disposition': f'attachment; filename=sub_{sub_id}.txt',
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Expires': '0'
-            })
-        else:
-            logging.error(f"❌ [SUB] خطا در دریافت سابسکریپشن از پنل. کد وضعیت: {response.status_code}")
-            return Response(f"Error: Panel returned {response.status_code}", status=500, mimetype='text/plain')
-            
+            data = response.json()
+            if data.get("success"):
+                for inbound in data.get("obj", []):
+                    if inbound.get("id") == INBOUND_ID:
+                        return inbound
     except Exception as e:
-        logging.error(f"❌ [SUB] خطای کلی در proxy subscription: {str(e)}")
-        return Response(f"Error: {str(e)}", status=500, mimetype='text/plain')
+        logging.error(f"خطا در دریافت تنظیمات Inbound: {e}")
+    return None
 
-@app.errorhandler(404)
-def not_found(e):
-    return Response("404 Not Found", status=404)
-
-def run_flask():
+def create_vless_link(email, limit_gb, expiry_days=30):
     try:
-        logging.info("🚀 [FLASK] شروع اجرای Flask روی پورت 80...")
-        log = logging.getLogger('werkzeug')
-        log.setLevel(logging.ERROR)
-        app.run(host='0.0.0.0', port=80, debug=False, threaded=True, use_reloader=False)
-    except Exception as e:
-        logging.error(f"❌ [FLASK] خطا در اجرای Flask (احتمالاً پورت 80 اشغال است): {e}")
+        # ۱. ثبت کاربر در پنل
+        add_url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/clients/add"
+        client_uuid = str(uuid.uuid4())
+        traffic_bytes = int(limit_gb * 1024 * 1024 * 1024)
+        expiry_time_ms = -int(expiry_days * 24 * 60 * 60 * 1000)
+        payload = {
+            "client": {
+                "id": client_uuid, "email": email, "flow": "", "limitIp": 2,
+                "totalGB": traffic_bytes, "expiryTime": expiry_time_ms,
+                "enable": True, "tgId": 0, "subId": generate_sub_id()
+            },
+            "inboundIds": [INBOUND_ID]
+        }
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {API_TOKEN}"}
+        response = requests.post(add_url, json=payload, headers=headers, timeout=10, verify=False)
+        
+        if response.status_code == 200 and response.json().get('success'):
+            # ۲. گرفتن تنظیمات سرور (پورت، مسیر، شبکه)
+            inbound = get_inbound_settings()
+            if not inbound:
+                logging.error("تنظیمات Inbound یافت نشد!")
+                return None
 
-# اجرای Flask در ترد پس‌زمینه
-flask_thread = threading.Thread(target=run_flask, daemon=True)
-flask_thread.start()
-logging.info("✅ [MAIN] Proxy Subscription روی پورت 80 فعال شد")
+            port = inbound.get("port", 443)
+            stream = inbound.get("streamSettings", {})
+            network = stream.get("network", "ws")
+            security = stream.get("security", "tls")
+            
+            path = stream.get("wsSettings", {}).get("path", WS_PATH)
+            host = stream.get("wsSettings", {}).get("headers", {}).get("Host", WS_DOMAIN)
+            
+            # ۳. دریافت آی‌پی تمیز
+            clean_ip = get_clean_ip()
+            
+            # ۴. ساخت لینک VLESS مستقیم
+            name = quote(f"Sanatify-{email}")
+            path_enc = quote(path, safe='')
+            
+            params = {
+                "encryption": "none",
+                "type": network,
+                "security": security,
+                "host": host,
+                "path": path_enc
+            }
+            if security == "tls":
+                params["sni"] = host
+                
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            vless_link = f"vless://{client_uuid}@{clean_ip}:{port}?{query_string}#{name}"
+            
+            logging.info(f"✅ لینک کانفیگ مستقیم ساخته شد: {vless_link[:50]}...")
+            return vless_link
+            
+        return None
+    except Exception as e:
+        logging.error(f"خطای سرور در ساخت کانفیگ: {str(e)}")
+        return None
 
 # ================================================================================
 
@@ -575,7 +516,7 @@ def send_welcome(message):
                             "🎁 <b>هدیه شما آماده است!</b> یک اکانت پرسرعت ۲ گیگابایتی با اعتبار ۱ روزه برای شما صادر شد:\n\n"
                             f"<code>{vless_link}</code>\n\n"
                             "📱 <b>راهنمای استفاده:</b>\n"
-                            "در منوی اصلی ربات روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید."
+                            "در منوی اصلی ربات روی دکمه <b>📱 راهنمای کانفیگ</b> بزنید."
                         )
                         try:
                             bot.send_message(int(referrer_id), gift_text, parse_mode="HTML")
@@ -591,7 +532,7 @@ def send_welcome(message):
         types.KeyboardButton("🛒 خرید اشتراک پرسرعت"),
         types.KeyboardButton("📊 وضعیت اشتراک من"),
         types.KeyboardButton("🎁 دعوت از دوستان (حجم رایگان)"),
-        types.KeyboardButton("📱 راهنمای سابسکریپشن"),
+        types.KeyboardButton("📱 راهنمای کانفیگ"),
         types.KeyboardButton("📚 راهنمای اتصال"),
         types.KeyboardButton("📞 پشتیبانی")
     )
@@ -602,33 +543,25 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
 
-@bot.message_handler(func=lambda message: message.text == "📱 راهنمای سابسکریپشن")
-def subscription_guide(message):
+@bot.message_handler(func=lambda message: message.text == "📱 راهنمای کانفیگ")
+def config_guide(message):
     if is_spammer(message.from_user.id):
         return
     guide_text = (
-        "📱 راهنمای کامل استفاده از سابسکریپشن\n\n"
-        "✅ مزایای سابسکریپشن:\n"
-        "• با هر بار آپدیت، جدیدترین آی‌پی‌های تمیز را دریافت می‌کنید\n"
-        "• نیازی به دریافت کانفیگ جدید نیست\n"
-        "• حجم و تاریخ انقضا به صورت خودکار نمایش داده می‌شود\n\n"
+        "📱 راهنمای استفاده از کانفیگ\n\n"
+        "✅ مزایای این روش:\n"
+        "• آی‌پی‌های تمیز به صورت خودکار در لینک شما قرار گرفته است.\n"
+        "• نیازی به آپدیت سابسکریپشن نیست.\n"
+        "• سرعت اتصال بسیار بالاتر است.\n\n"
         "🔧 نحوه اضافه کردن در v2rayNG:\n"
-        "۱. برنامه v2rayNG را باز کنید\n"
-        "۲. روی منوی سه خط (☰) بالا سمت راست بزنید\n"
-        "۳. گزینه Subscription group setting را انتخاب کنید\n"
-        "۴. روی آیکون + (بالا سمت راست) بزنید\n"
-        "۵. در صفحه باز شده:\n"
-        "   • در کادر remarks یک نام دلخواه بنویسید\n"
-        "   • در کادر Optional URL لینک سابسکریپشن را پیست کنید\n"
-        "   • گزینه Enable update را روشن کنید\n"
-        "   • ⚠️ مهم: گزینه Allow insecure HTTP address را حتماً روشن کنید\n"
-        "۶. روی تیک (✓) بالا سمت راست بزنید تا ذخیره شود\n"
-        "۷. با دکمه بازگشت به صفحه اصلی برگردید\n"
-        "۸. روی آیکون فلش چرخان (🔄) بزنید تا کانفیگ‌ها دانلود شوند\n"
-        "۹. سرور را انتخاب کرده و دکمه V را بزنید\n\n"
+        "۱. لینکی که ربات برای شما ارسال کرده را کپی کنید.\n"
+        "۲. برنامه v2rayNG را باز کنید.\n"
+        "۳. روی علامت مثبت (➕) در بالا سمت راست بزنید.\n"
+        "۴. گزینه Import config from clipboard را انتخاب کنید.\n"
+        "۵. کانفیگ به صورت خودکار اضافه می‌شود.\n"
+        "۶. روی سرور اضافه شده کلیک کرده و دکمه اتصال (V) را در پایین بزنید.\n\n"
         "📌 نکته مهم:\n"
-        "هر زمان که آی‌پی‌های سرور تغییر کند یا کانفیگ جدیدی اضافه شود،\n"
-        "با زدن دکمه آپدیت، همه چیز به‌طور خودکار دریافت می‌شود."
+        "هر زمان که اشتراک شما منقضی شود یا حجم آن تمام شود، کافیست مجدداً خرید کنید تا لینک جدید دریافت نمایید."
     )
     bot.send_message(message.chat.id, guide_text)
 
@@ -687,9 +620,9 @@ def handle_free_features(call):
             set_received_test(chat_id)
             success_text = (
                 "🎉 <b>اکانت تست ۱ روزه شما با موفقیت صادر شد!</b>\n\n"
-                "🎁 <b>لینک سابسکریپشن:</b>\n\n"
+                "🎁 <b>لینک کانفیگ شما:</b>\n\n"
                 f"<code>{vless_link}</code>\n\n"
-                "📱 در منوی اصلی روی دکمه <b>📱 راهنمای سابسکریپشن</b> بزنید."
+                "📱 در منوی اصلی روی دکمه <b>📱 راهنمای کانفیگ</b> بزنید."
             )
             bot.edit_message_text(success_text, call.message.chat.id, call.message.message_id, parse_mode="HTML")
         else:
@@ -859,20 +792,20 @@ def handle_admin_action(call):
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
         unique_username = f"user_{target_user_id}_{suffix}"
-        sub_link = create_vless_link(unique_username, limit_gb=PLANS[plan_key]['gb'], expiry_days=PLANS[plan_key]['days'])
-        if sub_link:
+        vless_link = create_vless_link(unique_username, limit_gb=PLANS[plan_key]['gb'], expiry_days=PLANS[plan_key]['days'])
+        if vless_link:
             if discount_code != "none" and discount_code in DISCOUNT_CODES:
                 mark_discount_used(target_user_id, discount_code)
             success_text = (
                 f"پرداخت تایید شد! 🎉\n\n"
-                f"🚀 <b>لینک سابسکریپشن:</b>\n\n"
-                f"<code>{sub_link}</code>\n\n"
-                f"📱 راهنما در منوی ربات <b>📱 راهنمای سابسکریپشن</b>"
+                f"🚀 <b>لینک کانفیگ شما:</b>\n\n"
+                f"<code>{vless_link}</code>\n\n"
+                f"📱 راهنما در منوی ربات <b>📱 راهنمای کانفیگ</b>"
             )
             bot.send_message(target_user_id, success_text, parse_mode="HTML")
-            bot.send_message(ADMIN_CHAT_ID, "سابسکریپشن صادر شد. ✅")
+            bot.send_message(ADMIN_CHAT_ID, "کانفیگ مستقیم صادر شد. ✅")
         else:
-            bot.send_message(ADMIN_CHAT_ID, "خطا در ساخت سابسکریپشن! ❌")
+            bot.send_message(ADMIN_CHAT_ID, "خطا در ساخت کانفیگ! ❌")
     elif action == "reject":
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
