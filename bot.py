@@ -633,7 +633,7 @@ def invite_friends_menu(message):
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("🎁 دریافت اکانت تست رایگان (۱ گیگ)", callback_data="get_test_config"),
+        types.InlineKeyboardButton("🎁 دریافت اکانت تست رایگان (۵۰۰ مگ)", callback_data="get_test_config"),
         types.InlineKeyboardButton("🤝 دریافت لینک دعوت (۲ گیگ هدیه)", callback_data="get_referral_link")
     )
     bot.send_message(message.chat.id, "کاربر عزیز، شما می‌توانید یک بار اکانت تست دریافت کنید یا با دعوت دوستان حجم رایگان بیشتری بگیرید.", reply_markup=markup)
@@ -654,10 +654,11 @@ def handle_free_features(call):
             bot.answer_callback_query(call.id, "❌ شما قبلاً اکانت تست خود را دریافت کرده‌اید.", show_alert=True)
             return
         bot.answer_callback_query(call.id, "⏳ در حال ساخت اکانت تست...")
-        bot.edit_message_text("⏳ در حال صدور اکانت تست رایگان (۱ گیگابایت)... لطفاً صبر کنید.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("⏳ در حال صدور اکانت تست رایگان (۵۰۰ مگابایت)... لطفاً صبر کنید.", call.message.chat.id, call.message.message_id)
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
         test_username = f"free_test_{chat_id}_{suffix}"
-        vless_link = create_vless_link(chat_id, test_username, limit_gb=1, expiry_days=1)
+        # تغییر حجم به 0.5 گیگابایت (500 مگابایت)
+        vless_link = create_vless_link(chat_id, test_username, limit_gb=0.5, expiry_days=1)
         if vless_link:
             set_received_test(chat_id)
             success_text = (
