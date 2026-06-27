@@ -36,10 +36,10 @@ INBOUND_ID = int(os.getenv("INBOUND_ID", 2))
 PANEL_SERVER_IP = urlparse(PANEL_URL).hostname
 
 # دریافت لیست IPها از .env و تبدیل به لیست
-CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.2")
+CLEAN_IP_STR = os.getenv("CLEAN_IP", "188.114.97.3")
 CLEAN_IPS = [ip.strip() for ip in CLEAN_IP_STR.split(",") if ip.strip()]
 
-# آدرس API برای دریافت IP تمیز
+# آدرس API برای دریافت IP تمیز (به عنوان پشتیبان)
 CLEAN_IP_API = os.getenv("CLEAN_IP_API", "https://api.ircf.space/v1/host")
 
 WS_DOMAIN = os.getenv("WS_DOMAIN", "v2.sanatify.ir")
@@ -309,6 +309,13 @@ def is_valid_ip(ip):
     return re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip) is not None
 
 def get_clean_ip():
+    # اولویت اول: لیست آی‌پی‌های ثابت در فایل .env
+    if CLEAN_IPS:
+        selected = random.choice(CLEAN_IPS)
+        logging.info(f"🔹 IP از لیست ثابت انتخاب شد: {selected}")
+        return selected
+        
+    # اولویت دوم: API سایت مرجع
     try:
         response = requests.get(CLEAN_IP_API, timeout=5, verify=False)
         if response.status_code == 200:
@@ -323,13 +330,9 @@ def get_clean_ip():
                 logging.info(f"🔹 IP تمیز از API دریافت شد: {ip}")
                 return ip
     except Exception as e:
-        logging.warning(f"⚠️ خطا در دریافت IP از API، استفاده از لیست ثابت: {e}")
+        logging.warning(f"⚠️ خطا در دریافت IP از API: {e}")
     
-    if CLEAN_IPS:
-        selected = random.choice(CLEAN_IPS)
-        logging.info(f"🔹 IP از لیست ثابت انتخاب شد: {selected}")
-        return selected
-    return "188.114.97.2"
+    return "188.114.97.3" # آی‌پی پیش‌فرض اضطراری
 
 def get_inbound_settings():
     url = f"{PANEL_URL}/{SECRET_PATH}/panel/api/inbounds/list"
@@ -515,8 +518,7 @@ def send_welcome(message):
                             "🎉 <b>تبریک فراوان! شما با موفقیت ۳ کاربر را به ربات دعوت کردید.</b>\n\n"
                             "🎁 <b>هدیه شما آماده است!</b> یک اکانت پرسرعت ۲ گیگابایتی با اعتبار ۱ روزه برای شما صادر شد:\n\n"
                             f"<code>{vless_link}</code>\n\n"
-                            "📱 <b>راهنمای استفاده:</b>\n"
-                            "در منوی اصلی ربات روی دکمه <b>📱 راهنمای کانفیگ</b> بزنید."
+                            "📱 برای یادگیری نحوه اتصال، به منوی اصلی مراجعه کرده و روی <b>📚 راهنمای اتصال</b> بزنید."
                         )
                         try:
                             bot.send_message(int(referrer_id), gift_text, parse_mode="HTML")
@@ -529,41 +531,18 @@ def send_welcome(message):
     
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        types.KeyboardButton("🛒 خرید اشتراک پرسرعت"),
-        types.KeyboardButton("📊 وضعیت اشتراک من"),
-        types.KeyboardButton("🎁 دعوت از دوستان (حجم رایگان)"),
-        types.KeyboardButton("📱 راهنمای کانفیگ"),
+        types.KeyboardButton("🛒 خرید اشتراک"),
+        types.KeyboardButton("📊 وضعیت اشتراک"),
+        types.KeyboardButton("🎁 دعوت دوستان"),
         types.KeyboardButton("📚 راهنمای اتصال"),
         types.KeyboardButton("📞 پشتیبانی")
     )
     welcome_text = (
-        f"سلام جناب {message.from_user.first_name} گرامی، به ربات هوشمند ما خوش آمدید. 🌹\n\n"
-        "ما برای شما امن‌ترین و پرسرعت‌ترین پروتکل‌های لایت‌اسپید را تدارک دیده‌ایم.\n"
-        "جهت تهیه اشتراک یا مانیتورینگ مصرف خود، از دکمه‌های زیر استفاده فرمایید."
+        f"🌟 سلام <b>{message.from_user.first_name}</b> گرامی، به ربات هوشمند ما خوش آمدید.\n\n"
+        "🚀 ما با استفاده از پیشرفته‌ترین پروتکل‌ها، اینترنتی امن، پایدار و بدون قطعی را برای شما فراهم کرده‌ایم.\n\n"
+        "💡 برای خرید اشتراک یا بررسی وضعیت خود، از منوی زیر استفاده نمایید:"
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
-
-@bot.message_handler(func=lambda message: message.text == "📱 راهنمای کانفیگ")
-def config_guide(message):
-    if is_spammer(message.from_user.id):
-        return
-    guide_text = (
-        "📱 راهنمای استفاده از کانفیگ\n\n"
-        "✅ مزایای این روش:\n"
-        "• آی‌پی‌های تمیز به صورت خودکار در لینک شما قرار گرفته است.\n"
-        "• نیازی به آپدیت سابسکریپشن نیست.\n"
-        "• سرعت اتصال بسیار بالاتر است.\n\n"
-        "🔧 نحوه اضافه کردن در v2rayNG:\n"
-        "۱. لینکی که ربات برای شما ارسال کرده را کپی کنید.\n"
-        "۲. برنامه v2rayNG را باز کنید.\n"
-        "۳. روی علامت مثبت (➕) در بالا سمت راست بزنید.\n"
-        "۴. گزینه Import config from clipboard را انتخاب کنید.\n"
-        "۵. کانفیگ به صورت خودکار اضافه می‌شود.\n"
-        "۶. روی سرور اضافه شده کلیک کرده و دکمه اتصال (V) را در پایین بزنید.\n\n"
-        "📌 نکته مهم:\n"
-        "هر زمان که اشتراک شما منقضی شود یا حجم آن تمام شود، کافیست مجدداً خرید کنید تا لینک جدید دریافت نمایید."
-    )
-    bot.send_message(message.chat.id, guide_text)
 
 @bot.message_handler(func=lambda message: message.text == "📚 راهنمای اتصال")
 def connection_guide(message):
@@ -571,28 +550,32 @@ def connection_guide(message):
         return
     guide_text = (
         "📚 راهنمای جامع اتصال به شبکه پرسرعت ما\n\n"
-        "لطفاً بر اساس سیستم‌عامل دستگاه خود، نرم‌افزار مربوطه را نصب کنید:\n\n"
-        "🤖 سیستم‌عامل اندروید:\n"
-        "۱. ابتدا نرم‌افزار v2rayNG را از گوگل‌پلی دانلود کنید.\n"
-        "۲. لینکی که ربات برای شما فرستاده را کپی کنید.\n"
-        "۳. وارد برنامه شوید، علامت مثبت + بالا را بزنید و گزینه Import config from clipboard را انتخاب کنید.\n"
-        "۴. روی کانکشن اضافه شده کلیک کرده و دکمه اتصال در پایین را بزنید.\n\n"
-        "🍏 سیستم‌عامل آیفون (iOS):\n"
-        "۱. نرم‌افزار FoXray یا v2raybox را از اپ‌استور دانلود کنید.\n"
+        "✅ <b>مزایای سیستم جدید:</b>\n"
+        "• کانفیگ با آی‌پی تمیز و پینگ پایین به صورت خودکار تولید می‌شود.\n"
+        "• نیازی به آپدیت سابسکریپشن ندارید؛ لینک مستقیم را کپی کنید.\n\n"
+        "🤖 <b>سیستم‌عامل اندروید:</b>\n"
+        "۱. لینکی که ربات برای شما ارسال کرده را کپی کنید.\n"
+        "۲. برنامه <b>v2rayNG</b> را باز کنید.\n"
+        "۳. روی علامت مثبت (➕) در بالا سمت راست بزنید.\n"
+        "۴. گزینه <code>Import config from clipboard</code> را انتخاب کنید.\n"
+        "۵. روی کانکشن اضافه شده کلیک کرده و دکمه اتصال (V) را در پایین بزنید.\n\n"
+        "🍏 <b>سیستم‌عامل آیفون (iOS):</b>\n"
+        "۱. نرم‌افزار <b>FoXray</b> یا <b>v2raybox</b> را از اپ‌استور دانلود کنید.\n"
         "۲. لینک کپی‌شده را از طریق علامت + در برنامه پیست (Import) کنید.\n\n"
-        "💻 سیستم‌عامل ویندوز (کامپیوتر):\n"
-        "۱. برنامه v2rayN را دانلود و اجرا کرده و لینک را پیست کنید."
+        "💻 <b>سیستم‌عامل ویندوز (کامپیوتر):</b>\n"
+        "۱. برنامه <b>v2rayN</b> را دانلود و اجرا کنید.\n"
+        "۲. از منوی برنامه گزینه Import from clipboard را انتخاب کنید."
     )
-    bot.send_message(message.chat.id, guide_text)
+    bot.send_message(message.chat.id, guide_text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda message: message.text == "🎁 دعوت از دوستان (حجم رایگان)")
+@bot.message_handler(func=lambda message: message.text == "🎁 دعوت دوستان")
 def invite_friends_menu(message):
     if is_spammer(message.from_user.id, cooldown=2.0):
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🎁 دریافت اکانت تست رایگان (۱ گیگ)", callback_data="get_test_config"),
-        types.InlineKeyboardButton("🤝 دعوت از دوستان (۲ گیگ هدیه)", callback_data="get_referral_link")
+        types.InlineKeyboardButton("🤝 دریافت لینک دعوت (۲ گیگ هدیه)", callback_data="get_referral_link")
     )
     bot.send_message(message.chat.id, "کاربر عزیز، شما می‌توانید یک بار اکانت تست دریافت کنید یا با دعوت دوستان حجم رایگان بیشتری بگیرید.", reply_markup=markup)
 
@@ -622,7 +605,7 @@ def handle_free_features(call):
                 "🎉 <b>اکانت تست ۱ روزه شما با موفقیت صادر شد!</b>\n\n"
                 "🎁 <b>لینک کانفیگ شما:</b>\n\n"
                 f"<code>{vless_link}</code>\n\n"
-                "📱 در منوی اصلی روی دکمه <b>📱 راهنمای کانفیگ</b> بزنید."
+                "📱 برای یادگیری نحوه اتصال، به منوی اصلی مراجعه کرده و روی <b>📚 راهنمای اتصال</b> بزنید."
             )
             bot.edit_message_text(success_text, call.message.chat.id, call.message.message_id, parse_mode="HTML")
         else:
@@ -649,7 +632,7 @@ def support_info(message):
         return
     bot.send_message(message.chat.id, "✍️ در صورت اختلال یا نیاز به راهنمایی، با پشتیبانی در ارتباط باشید:\n\n🆔 @SpeedNet_VpnBot")
 
-@bot.message_handler(func=lambda message: message.text == "📊 وضعیت اشتراک من")
+@bot.message_handler(func=lambda message: message.text == "📊 وضعیت اشتراک")
 def show_user_stats(message):
     if is_spammer(message.from_user.id, cooldown=5.0):
         try: bot.send_message(message.chat.id, "⚠️ لطفاً چند ثانیه صبور باشید.")
@@ -662,7 +645,7 @@ def show_user_stats(message):
     else:
         bot.send_message(message.chat.id, "❌ شما در حال حاضر اشتراک فعالی ندارید.\nجهت خرید روی دکمه خرید کلیک کنید. 🛒")
 
-@bot.message_handler(func=lambda message: message.text == "🛒 خرید اشتراک پرسرعت")
+@bot.message_handler(func=lambda message: message.text == "🛒 خرید اشتراک")
 def select_plan(message):
     if is_spammer(message.from_user.id):
         return
@@ -800,7 +783,7 @@ def handle_admin_action(call):
                 f"پرداخت تایید شد! 🎉\n\n"
                 f"🚀 <b>لینک کانفیگ شما:</b>\n\n"
                 f"<code>{vless_link}</code>\n\n"
-                f"📱 راهنما در منوی ربات <b>📱 راهنمای کانفیگ</b>"
+                f"📱 برای یادگیری نحوه اتصال، به منوی اصلی مراجعه کرده و روی <b>📚 راهنمای اتصال</b> بزنید."
             )
             bot.send_message(target_user_id, success_text, parse_mode="HTML")
             bot.send_message(ADMIN_CHAT_ID, "کانفیگ مستقیم صادر شد. ✅")
